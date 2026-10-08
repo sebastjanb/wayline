@@ -4,7 +4,7 @@
 // whole in the background and takes over only once every file has arrived.
 // Map tiles are kept too, so streets already seen still draw offline.
 
-const VERSION = '2.6';
+const VERSION = '2.7';
 const SHELL = 'wayline-shell-' + VERSION;
 const TILES = 'wayline-tiles-v1';
 const MAX_TILES = 400;
