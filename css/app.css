@@ -202,4 +202,4 @@ h1 { margin: 0; padding: 22px 30px 12px; font-size: 24px; font-weight: 700; colo
 #boot { position: absolute; left: 60px; top: 250px; width: 480px; z-index: 5; text-align: center; font-size: 24px; font-weight: 600; color: var(--dim); }
 
 /* A note that leaves the map free: used when a last known position is on show. */
-.status.mini { top: 112px; padding: 8px 18px; font-size: 18px; font-weight: 500; border-radius: 18px; }
+.status.mini { top: 100px; transform: translate(-50%, 0); padding: 8px 18px; font-size: 18px; font-weight: 500; border-radius: 18px; }

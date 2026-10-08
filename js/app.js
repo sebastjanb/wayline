@@ -3,7 +3,7 @@ import { RouteGuide } from './guide.js';
 import { searchPlaces, fetchRoute, MODES } from './services.js';
 import { lonToX, latToY, xToLon, yToLat, distance, bearing, angleDiff, formatDistance, formatDuration, EARTH_CIRCUMFERENCE } from './geo.js';
 
-const APP_VERSION = '2.7';
+const APP_VERSION = '2.8';
 
 // The app is static and can live on any host. The phone relay is a server
 // function, so it and the phone page stay on Netlify.
@@ -112,6 +112,7 @@ function renderStatus() {
   else if (!state.fix && !FIXED) {
     // The first position can take up to a minute on the glasses. That is slow, not off.
     text = approx ? `Last known position. Finding you… ${waited} s` : `Finding your location… ${waited} s`;
+    if (waited >= 20) text += '. To speed up: middle tap, Permissions, switch Location off and on.';
   }
   else if (!loaded) text = failed ? 'Map could not load. Check the connection.' : 'Loading map…';
   $('status').textContent = text;
@@ -134,7 +135,8 @@ function renderStatus() {
 const input = { keys: 0, last: '-' };
 function renderDebug() {
   const { loaded, failed } = map.store.stats;
-  const where = (state.fix ? `ok ±${Math.round(state.fix.accuracy)}m` : loc.error ? loc.error.slice(0, 6) : locPending ? 'asking' : 'idle');
+  const where = (state.fix ? `ok ±${Math.round(state.fix.accuracy)}m` : loc.error ? loc.error.slice(0, 6) : locPending ? 'asking' : 'idle') + ` a${loc.asked || 0}`
+    + (loc.firstFixAfter ? ` in ${loc.firstFixAfter}s` : '');
   const focus = document.activeElement && (document.activeElement.id || document.activeElement.textContent.trim().slice(0, 10)) || 'none';
   $('debug').textContent = `v${APP_VERSION} · loc ${where} ×${loc.errors || 0} · perm ${permission} · map ${loaded}/${failed} · key ${input.keys} ${input.last} · at ${focus}${navigator.onLine ? '' : ' · offline'}`;
 }
@@ -294,6 +296,7 @@ document.addEventListener('click', (e) => {
 document.addEventListener('keydown', (e) => {
   input.keys++;
   input.last = e.key.replace('Arrow', '');
+  askOnGesture(e.key === 'Enter');
   setTimeout(renderDebug, 0);
   if (e.key === 'Enter') {
     const target = chosen();
@@ -344,6 +347,35 @@ let permission = 'unknown';   // 'granted' | 'prompt' | 'denied' | 'unknown'
 const burst = { n: 0, at: 0 };
 let statusAt = 0;
 
+function gotPosition(p) {
+  if (!loc.firstFixAfter && loc.firstAskAt) loc.firstFixAfter = Math.max(1, Math.round((Date.now() - loc.firstAskAt) / 1000));
+  loc.fixes++;
+  loc.error = '';
+  loc.lastAt = Date.now();
+  if (!settings.locOk) { settings.locOk = true; saveSettings(); }
+  onFix(p.coords.latitude, p.coords.longitude, p.coords.accuracy);
+}
+
+// The request made at launch has no user gesture behind it, and the glasses may
+// hold such a request back. So the wearer's first swipe and first select each
+// send one extra request of their own. The standing watch is left untouched:
+// replacing it would throw away a request that may be about to be answered.
+let gestureAsks = 0;
+function askOnGesture(isSelect) {
+  if (state.fix || FIXED || !navigator.geolocation || loc.error.startsWith('code 1')) return;
+  if (gestureAsks >= 2 || (gestureAsks === 1 && !isSelect)) return;
+  gestureAsks++;
+  loc.asked = (loc.asked || 0) + 1;
+  navigator.geolocation.getCurrentPosition(
+    (p) => {
+      if (locPending) { locPending = false; catchUpHistory(); }
+      gotPosition(p);
+    },
+    () => {},
+    { enableHighAccuracy: false, timeout: 60000, maximumAge: 600000 },
+  );
+}
+
 // A standing watch, set up exactly as in the first version: on the glasses it
 // delivers a position within seconds, where one-shot requests can go unanswered
 // for a minute. Two guards around it: an error flood stops the watch for a few
@@ -372,12 +404,8 @@ function startLocation() {
   watchId = navigator.geolocation.watchPosition(
     (p) => {
       answered();
-      loc.fixes++;
-      loc.error = '';
-      loc.lastAt = Date.now();
-      if (!settings.locOk) { settings.locOk = true; saveSettings(); }
       clearTimeout(watchdog);
-      onFix(p.coords.latitude, p.coords.longitude, p.coords.accuracy);
+      gotPosition(p);
     },
     (err) => {
       answered();
