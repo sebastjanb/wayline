@@ -3,7 +3,7 @@ import { RouteGuide } from './guide.js';
 import { searchPlaces, fetchRoute, MODES } from './services.js';
 import { lonToX, latToY, xToLon, yToLat, distance, bearing, angleDiff, formatDistance, formatDuration, EARTH_CIRCUMFERENCE } from './geo.js';
 
-const APP_VERSION = '2.6';
+const APP_VERSION = '2.7';
 
 // The app is static and can live on any host. The phone relay is a server
 // function, so it and the phone page stay on Netlify.
@@ -104,20 +104,21 @@ function toast(text, ms = 2600) {
 function renderStatus() {
   const { loaded, failed } = map.store.stats;
   const denied = !state.fix && loc.error.startsWith('code 1');
-  const notAsked = !state.fix && !FIXED && (!loc.asked || (locPending && Date.now() - watchStartedAt > 6000));
+  const waited = loc.firstAskAt ? Math.round((Date.now() - loc.firstAskAt) / 1000) : 0;
+  const approx = !state.fix && settings.last;
   let text = '';
   if (lastError) text = 'Error: ' + lastError;
-  else if (notAsked || denied) text = 'Location is off. Middle tap, Permissions, allow Location.';
-  else if (!state.fix) {
-    text = loc.error.startsWith('code 2') ? 'The phone has no position yet. Still trying…'
-      : loc.error.startsWith('code 3') ? 'Location is slow. Still trying…'
-      : 'Finding your location…';
+  else if (denied) text = 'Location is off. Middle tap, Permissions, allow Location.';
+  else if (!state.fix && !FIXED) {
+    // The first position can take up to a minute on the glasses. That is slow, not off.
+    text = approx ? `Last known position. Finding you… ${waited} s` : `Finding your location… ${waited} s`;
   }
   else if (!loaded) text = failed ? 'Map could not load. Check the connection.' : 'Loading map…';
   $('status').textContent = text;
+  // With a last known position the map is usable: the note moves out of its way.
+  $('status').classList.toggle('mini', Boolean(approx && !denied && !lastError));
 
-  // One select press asks for location.
-  const offer = !lastError && (notAsked || denied);
+  const offer = !lastError && denied;
   const ask = $('enable-location'), wasHidden = ask.hidden;
   ask.hidden = !offer;
   if (offer && wasHidden && state.screen === 'home') ask.focus();
@@ -330,7 +331,7 @@ function onFix(lat, lon, accuracy, course = null) {
     calibrateCompass(state.course);
   }
   state.fix = { lat, lon, accuracy };
-  settings.last = { lat, lon };
+  settings.last = { lat, lon, at: Date.now() };
   if (Date.now() - lastSavedAt > 30000) { lastSavedAt = Date.now(); saveSettings(); }
   if (state.screen === 'place' && state.routeWaiting) loadRoute();
   if (state.guide) guide();
@@ -355,14 +356,18 @@ function startLocation() {
   locPending = !state.fix;
   watchStartedAt = Date.now();
   loc.asked = (loc.asked || 0) + 1;
+  if (!loc.firstAskAt) loc.firstAskAt = Date.now();
   const answered = () => {
     if (!locPending) return;
     locPending = false;
     catchUpHistory();
   };
+  // Starting over throws away a request that is about to be answered, and a
+  // wearer standing still gets no new positions anyway. So the watch is only
+  // replaced when it has given nothing at all for two minutes.
   const quiet = () => {
     clearTimeout(watchdog);
-    watchdog = setTimeout(() => { if (Date.now() - loc.lastAt > 24000) startLocation(); }, 25000);
+    watchdog = setTimeout(() => { if (!state.fix) startLocation(); }, 120000);
   };
   watchId = navigator.geolocation.watchPosition(
     (p) => {
@@ -371,7 +376,7 @@ function startLocation() {
       loc.error = '';
       loc.lastAt = Date.now();
       if (!settings.locOk) { settings.locOk = true; saveSettings(); }
-      quiet();
+      clearTimeout(watchdog);
       onFix(p.coords.latitude, p.coords.longitude, p.coords.accuracy);
     },
     (err) => {
@@ -526,7 +531,8 @@ function refresh() {
   map.routeFrom = null;
   map.dest = null;
   map.labels = true;
-  map.puck = fix ? { ...world(fix), accuracy: fix.accuracy, heading: facing() } : null;
+  map.puck = fix ? { ...world(fix), accuracy: fix.accuracy, heading: facing() }
+    : settings.last ? { ...world(settings.last), accuracy: 0, heading: null, stale: true } : null;
 
   if (screen === 'home') {
     map.setLayout({ x: 300, y: 280 }, { x: 300, y: 280, r: 280 });
@@ -833,17 +839,19 @@ async function loadRoute() {
   $('place-min').textContent = '–';
   $('place-unit').textContent = 'min';
   $('place-eta').textContent = '';
+  // No position yet: plan from the last known one, and plan again when the real one arrives.
+  const from = fix || settings.last;
   state.routeWaiting = !fix;
-  if (!fix) { $('place-summary').textContent = 'Waiting for location…'; return false; }
+  if (!from) { $('place-summary').textContent = 'Waiting for location…'; return false; }
   $('place-summary').textContent = 'Finding route…';
   try {
-    const route = await fetchRoute(fix, place, settings.mode);
+    const route = await fetchRoute(from, place, settings.mode);
     if (token !== state.routeToken) return false;
     state.route = route;
     showTravelTime(route.time);
     $('place-summary').textContent = `${modeLabel()} ${formatDistance(route.total, settings.imperial)}`;
-    $('place-eta').textContent = `ETA ${clock(new Date(Date.now() + route.time * 1000))}`;
-    $('start').disabled = false;
+    $('place-eta').textContent = fix ? `ETA ${clock(new Date(Date.now() + route.time * 1000))}` : 'From last known position. Finding you…';
+    $('start').disabled = !fix;
     if (state.screen === 'place') {
       if (document.activeElement === document.body) $('start').focus();
       refresh();
@@ -1102,7 +1110,7 @@ $('mute').addEventListener('click', () => {
 $('recenter').addEventListener('click', async () => {
   state.follow = true;
   await startCompass();
-  if (!state.fix) startLocation();   // ask again: a select gesture may be what the prompt was waiting for
+  if (!state.fix && watchId == null) startLocation();
   refresh();
 });
 $('zoom-in').addEventListener('click', () => zoomHome(1));
@@ -1199,7 +1207,7 @@ activate('home');
 renderStatus();
 beginLocation();
 $('enable-location').addEventListener('click', () => {
-  startLocation();
+  if (Date.now() - watchStartedAt > 10000) startLocation();   // not more often: each start resets the request
   toast('Asking for location…', 2000);
 });
 window.addEventListener('online', renderStatus);

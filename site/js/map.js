@@ -653,7 +653,8 @@ export class MapView {
         ctx.ellipse(q[0], q[1], 21, 21 * squash, 0, 0, 7);
         ctx.fillStyle = '#101d42';
         ctx.fill();
-        ctx.strokeStyle = '#ffffff';
+        const ink = this.puck.stale ? '#8f9bbd' : '#ffffff';   // grey: last known, not current
+        ctx.strokeStyle = ink;
         ctx.lineWidth = 4;
         ctx.stroke();
         ctx.beginPath();
@@ -667,7 +668,7 @@ export class MapView {
           });
           ctx.closePath();
         }
-        ctx.fillStyle = '#ffffff';
+        ctx.fillStyle = ink;
         ctx.fill();
       }
     }
