@@ -1,9 +1,9 @@
 import { MapView } from './map.js';
 import { RouteGuide } from './guide.js';
 import { searchPlaces, fetchRoute, MODES } from './services.js';
-import { lonToX, latToY, distance, bearing, angleDiff, formatDistance, formatDuration, EARTH_CIRCUMFERENCE } from './geo.js';
+import { lonToX, latToY, xToLon, yToLat, distance, bearing, angleDiff, formatDistance, formatDuration, EARTH_CIRCUMFERENCE } from './geo.js';
 
-const APP_VERSION = '2.1';
+const APP_VERSION = '2.2';
 
 // The app is static and can live on any host. The phone relay is a server
 // function, so it and the phone page stay on Netlify.
@@ -104,11 +104,10 @@ function toast(text, ms = 2600) {
 function renderStatus() {
   const { loaded, failed } = map.store.stats;
   const denied = !state.fix && loc.error.startsWith('code 1');
-  const notAsked = !state.fix && !loc.asked && !FIXED;
+  const notAsked = !state.fix && !FIXED && (!loc.asked || (locPending && Date.now() - watchStartedAt > 6000));
   let text = '';
   if (lastError) text = 'Error: ' + lastError;
-  else if (notAsked) text = 'Location is needed for navigation.';
-  else if (denied) text = 'Location is off. If the button does not help: middle tap, Permissions.';
+  else if (notAsked || denied) text = 'Location is off. Middle tap, Permissions, allow Location.';
   else if (!state.fix) {
     text = loc.error.startsWith('code 2') ? 'No location from the phone yet. Still trying…'
       : loc.error.startsWith('code 3') ? 'Location is slow. Still trying…'
@@ -126,7 +125,7 @@ function renderStatus() {
 
   // Always on screen, so a fault can be read without opening any menu.
   const where = state.fix ? `ok ±${Math.round(state.fix.accuracy)}m` : locPending ? 'asking' : loc.error ? loc.error.slice(0, 6) : 'idle';
-  $('debug').textContent = `v${APP_VERSION} · loc ${where} · map ${loaded}/${failed}${navigator.onLine ? '' : ' · offline'}`;
+  $('debug').textContent = `v${APP_VERSION} · loc ${where} · perm ${permission} · map ${loaded}/${failed}${navigator.onLine ? '' : ' · offline'}`;
   if (state.screen === 'diag') renderDiagnostics();
 }
 
@@ -316,24 +315,48 @@ function startLocation(again = false) {
   renderStatus();
 }
 
-// Location starts by itself only when that cannot raise a prompt: the
-// permission reads as granted, or it worked on an earlier launch. Otherwise the
-// app waits for the wearer to press "Turn on location".
+// Location is asked for at launch. On the glasses the wearer may still have to
+// allow it (middle tap, Permissions), so the app keeps checking and starts the
+// moment it is allowed, with no restart. Buttons stay usable meanwhile, because
+// navigation leaves history alone while a request is unanswered.
+let permissionStatus = null, locationRetries = 0;
+
 function beginLocation() {
   if (FIXED) { startLocation(); return; }
-  const auto = () => { if (permission === 'granted' || (permission !== 'denied' && settings.locOk)) startLocation(); else renderStatus(); };
   let query = null;
   try { query = navigator.permissions && navigator.permissions.query && navigator.permissions.query({ name: 'geolocation' }); } catch {}
-  if (!query) { auto(); return; }
+  const begin = () => {
+    if (permission !== 'denied') startLocation();
+    renderStatus();
+    setInterval(keepTryingLocation, 4000);
+  };
+  if (!query) { begin(); return; }
   query.then((status) => {
+    permissionStatus = status;
     permission = status.state;
     status.onchange = () => {
       permission = status.state;
       if (permission === 'granted' && !state.fix) startLocation(true);
       renderStatus();
     };
-    auto();
-  }).catch(auto);
+    begin();
+  }).catch(begin);
+}
+
+function keepTryingLocation() {
+  if (state.fix || FIXED) return;
+  if (permissionStatus) {
+    // Reading the state raises no prompt, so it is safe to do often.
+    const was = permission;
+    permission = permissionStatus.state;
+    const refused = loc.error.startsWith('code 1');
+    if ((permission === 'granted' && (refused || !loc.asked)) || (was === 'denied' && permission !== 'denied')) startLocation(true);
+  } else if (loc.error.startsWith('code 1') && locationRetries < 40) {
+    // No way to read the permission here: ask again now and then, sparingly.
+    locationRetries++;
+    if (locationRetries % 2 === 0) startLocation(true);
+  }
+  renderStatus();
 }
 
 let lastAimAt = 0;
@@ -459,6 +482,38 @@ function refresh() {
   }
   aimCamera();
 }
+
+// Landmark pins on the home map can be selected: an unseen button sits on each
+// pin, so the directional focus reaches it and select opens its route card.
+const pinButtons = new Map();
+map.onLandmarks = (shown) => {
+  const live = state.screen === 'home' ? shown : [];
+  const seen = new Set();
+  for (const { poi, q } of live) {
+    const key = poi.name + poi.x;
+    seen.add(key);
+    let button = pinButtons.get(key);
+    if (!button) {
+      button = document.createElement('button');
+      button.className = 'pin';
+      button.setAttribute('aria-label', poi.name);
+      button.addEventListener('click', () => openPlace({
+        name: poi.name, detail: '', kind: poi.sub || poi.cls, lat: yToLat(poi.y), lon: xToLon(poi.x), meters: null,
+      }));
+      button.addEventListener('focus', () => { map.keepLandmark = key; });
+      button.addEventListener('blur', () => { if (map.keepLandmark === key) map.keepLandmark = null; });
+      $('pins').append(button);
+      pinButtons.set(key, button);
+    }
+    button.style.transform = `translate(${Math.round(q[0] - 22)}px, ${Math.round(q[1] - 43)}px)`;
+  }
+  for (const [key, button] of pinButtons) {
+    if (seen.has(key)) continue;
+    if (document.activeElement === button && state.screen === 'home') $('open-type').focus();
+    button.remove();
+    pinButtons.delete(key);
+  }
+};
 
 // Pinch-and-drag pans the home map. Recenter puts it back on the wearer.
 let drag = null;

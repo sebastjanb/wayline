@@ -233,6 +233,8 @@ export class MapView {
     this.routeStyle = 'preview';   // 'preview' (blue dots) or 'guide' (white dots)
     this.labels = false;    // draw street names
     this.landmarks = true;  // draw pins for notable places
+    this.keepLandmark = null;   // a pin the wearer has focused stays on the map
+    this.onLandmarks = null;    // told which pins were drawn, and where
     this.raf = 0;
     this.resize();
   }
@@ -569,10 +571,12 @@ export class MapView {
         if (Math.hypot(q[0] - ax, q[1] - ay) < 60) continue;
         // Sights, hotels and parks come before places to eat, which are everywhere.
         const everyday = poi.style.glyph === 'food' || poi.style.glyph === 'cup' ? 400 : 0;
-        found.push({ poi, q, order: everyday + poi.rank * 40 + Math.hypot(q[0] - ax, q[1] - ay) });
+        const kept = poi.name + poi.x === this.keepLandmark ? -1e6 : 0;
+        found.push({ poi, q, order: kept + everyday + poi.rank * 40 + Math.hypot(q[0] - ax, q[1] - ay) });
       }
       found.sort((a, b) => a.order - b.order);
       let shown = 0;
+      const drawn = [];
       for (const { poi, q } of found) {
         if (shown >= 4) break;
         const name = poi.name.length > 20 ? poi.name.slice(0, 19).trimEnd() + '…' : poi.name;
@@ -582,6 +586,7 @@ export class MapView {
         if (placed.some((p) => Math.hypot(p.q[0] - centre[0], p.q[1] - centre[1]) < p.half + half)) continue;
         placed.push({ q: centre, half });
         shown++;
+        drawn.push({ poi, q });
         // Pin: a disc with a point underneath, tip on the place itself.
         ctx.beginPath();
         ctx.moveTo(q[0], q[1]);
@@ -600,7 +605,8 @@ export class MapView {
         ctx.fillStyle = '#f2f5fc';
         ctx.fillText(name, q[0] + 19, q[1] - 20);
       }
-    }
+      if (this.onLandmarks) this.onLandmarks(drawn);
+    } else if (this.onLandmarks) this.onLandmarks([]);
 
     for (const pin of this.pins) {
       const q = toScreen(pin.x, pin.y);
