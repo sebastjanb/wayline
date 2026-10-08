@@ -3,7 +3,7 @@ import { RouteGuide } from './guide.js';
 import { searchPlaces, fetchRoute, MODES } from './services.js';
 import { lonToX, latToY, xToLon, yToLat, distance, bearing, angleDiff, formatDistance, formatDuration, EARTH_CIRCUMFERENCE } from './geo.js';
 
-const APP_VERSION = '2.8';
+const APP_VERSION = '2.9';
 
 // The app is static and can live on any host. The phone relay is a server
 // function, so it and the phone page stay on Netlify.
@@ -112,7 +112,7 @@ function renderStatus() {
   else if (!state.fix && !FIXED) {
     // The first position can take up to a minute on the glasses. That is slow, not off.
     text = approx ? `Last known position. Finding you… ${waited} s` : `Finding your location… ${waited} s`;
-    if (waited >= 20) text += '. To speed up: middle tap, Permissions, switch Location off and on.';
+    if (waited >= 8) text += '. Select any button to find you now.';
   }
   else if (!loaded) text = failed ? 'Map could not load. Check the connection.' : 'Loading map…';
   $('status').textContent = text;
@@ -356,15 +356,17 @@ function gotPosition(p) {
   onFix(p.coords.latitude, p.coords.longitude, p.coords.accuracy);
 }
 
-// The request made at launch has no user gesture behind it, and the glasses may
-// hold such a request back. So the wearer's first swipe and first select each
-// send one extra request of their own. The standing watch is left untouched:
-// replacing it would throw away a request that may be about to be answered.
-let gestureAsks = 0;
+// Confirmed on the glasses: a request made at launch, with no gesture behind it,
+// is held back, while one sent from a select is answered at once. So until the
+// first position arrives, the first swipe and every select send a request of
+// their own (at most one every few seconds). The standing watch is left alone.
+let gestureAsks = 0, gestureAskAt = 0;
 function askOnGesture(isSelect) {
-  if (state.fix || FIXED || !navigator.geolocation || loc.error.startsWith('code 1')) return;
-  if (gestureAsks >= 2 || (gestureAsks === 1 && !isSelect)) return;
+  if (state.fix || FIXED || !navigator.geolocation) return;
+  const now = Date.now();
+  if (isSelect ? now - gestureAskAt < 4000 : gestureAsks > 0) return;
   gestureAsks++;
+  gestureAskAt = now;
   loc.asked = (loc.asked || 0) + 1;
   navigator.geolocation.getCurrentPosition(
     (p) => {
