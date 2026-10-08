@@ -7,7 +7,7 @@ import { EARTH_CIRCUMFERENCE, yToLat, xToLon, distance } from './geo.js';
 
 const TILEJSON = 'https://tiles.openfreemap.org/planet';
 const TEMPLATE_KEY = 'glassnav.tiles';
-const LAYERS = ['water', 'waterway', 'park', 'landcover', 'building', 'transportation', 'transportation_name', 'poi'];
+const LAYERS = ['water', 'waterway', 'park', 'landcover', 'transportation', 'transportation_name', 'poi'];
 const MAX_TILES = 48;
 const DATA_MAX_ZOOM = 14;
 const CAMERA_DISTANCE = 1100;
@@ -18,8 +18,8 @@ const ROAD_RANK = {
   minor: 1, service: 1, busway: 1,
   path: 0, track: 0, pedestrian: 0, pier: 0,
 };
-const ROAD_WIDTH = [1.4, 2.4, 3.4, 4.6];
-const ROAD_COLOR = ['rgba(140,146,160,.5)', '#7d8490', '#9ea4b0', '#c3c8d2'];
+const ROAD_WIDTH = [1.6, 3.2, 5, 7];
+const ROAD_COLOR = ['rgba(160,174,214,.42)', '#8794ba', '#a7b3d6', '#c6cfec'];
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
@@ -35,7 +35,7 @@ function shape(pts) {
 }
 
 function buildTile(z, x, y, layers) {
-  const tile = { z, x, y, water: [], waterway: [], park: [], building: [], roadArea: [], roads: [[], [], [], []], labels: [], pois: [] };
+  const tile = { z, x, y, water: [], waterway: [], park: [], roadArea: [], roads: [[], [], [], []], labels: [], pois: [] };
   const polys = (name, into, keep) => {
     for (const f of layers[name] || []) {
       if (f.type !== 3 || (keep && !keep(f.props))) continue;
@@ -45,7 +45,6 @@ function buildTile(z, x, y, layers) {
   polys('water', tile.water);
   polys('park', tile.park);
   polys('landcover', tile.park, (p) => p.class === 'grass' || p.class === 'wood');
-  polys('building', tile.building);
   for (const f of layers.waterway || []) {
     if (f.type === 2) for (const part of f.parts) tile.waterway.push(shape(part));
   }
@@ -64,7 +63,8 @@ function buildTile(z, x, y, layers) {
     for (const part of f.parts) if (!longest || part.length > longest.length) longest = part;
     if (!longest || longest.length < 4) continue;
     const mid = (longest.length >> 2) * 2;
-    tile.labels.push({ name, rank, x: (longest[mid - 2] + longest[mid]) / 2, y: (longest[mid - 1] + longest[mid + 1]) / 2 });
+    // The two ends of the middle segment give the label its place and its slant.
+    tile.labels.push({ name: name.toUpperCase(), rank, ax: longest[mid - 2], ay: longest[mid - 1], bx: longest[mid], by: longest[mid + 1] });
   }
   for (const f of layers.poi || []) {
     const name = f.props['name:en'] || f.props.name_en || f.props['name:latin'] || f.props.name;
@@ -181,7 +181,7 @@ export class MapView {
     this.routeFrom = null;  // { index, x, y }: the route is drawn from here on
     this.dest = null;       // { x, y }
     this.pins = [];         // [{ x, y, label, active }]
-    this.turnArrow = null;  // Float64Array: the route through the next turn
+    this.routeStyle = 'preview';   // 'preview' (blue dots) or 'guide' (white dots)
     this.labels = false;    // draw street names
     this.raf = 0;
     this.resize();
@@ -404,7 +404,7 @@ export class MapView {
 
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
-    ctx.fillStyle = '#0c121d';
+    ctx.fillStyle = '#0a1532';
     ctx.fillRect(0, 0, this.size, this.size);
 
     const fill = (bucket, color) => {
@@ -413,17 +413,16 @@ export class MapView {
       ctx.fillStyle = color;
       ctx.fill('evenodd');
     };
-    fill('park', '#12301f');
-    fill('water', '#123a66');
+    fill('park', '#0f2a33');
+    fill('water', '#0c2358');
     ctx.beginPath();
     for (const tile of tiles) for (const s of tile.waterway) if (seen(s)) line(s.pts);
-    ctx.strokeStyle = '#123a66';
+    ctx.strokeStyle = '#0c2358';
     ctx.lineWidth = 2;
     ctx.stroke();
-    if (cam.zoom >= 16.4) fill('building', '#1a2233');
-    fill('roadArea', '#1b2638');
+    fill('roadArea', '#1a2850');
 
-    const widthScale = clamp(2 ** (cam.zoom - 16), 0.5, 1.5);
+    const widthScale = clamp(2 ** (cam.zoom - 16), 0.4, 1.6);
     for (let rank = cam.zoom < 13.5 ? 2 : cam.zoom < 15 ? 1 : 0; rank < 4; rank++) {
       ctx.beginPath();
       for (const tile of tiles) for (const s of tile.roads[rank]) if (seen(s)) line(s.pts);
@@ -432,78 +431,78 @@ export class MapView {
       ctx.stroke();
     }
 
+    // The route is a string of dots, the way walking directions are drawn.
     if (this.route) {
-      const from = this.routeFrom;
+      const from = this.routeFrom, guiding = this.routeStyle === 'guide';
+      const path = [];
+      if (from) { const q = toScreen(from.x, from.y); if (q) path.push(q); }
+      for (let i = from ? (from.index + 1) * 2 : 0; i < this.route.length; i += 2) {
+        const q = toScreen(this.route[i], this.route[i + 1]);
+        if (q) path.push(q);
+      }
+      const gap = guiding ? 22 : 15, radius = guiding ? 5.5 : 4.5;
+      let next = guiding ? gap : 0;   // while guiding, the first dot sits clear of the marker
       ctx.beginPath();
-      line(this.route, from ? (from.index + 1) * 2 : 0, from);
-      ctx.strokeStyle = 'rgba(140,90,255,.4)';
-      ctx.lineWidth = 16;
-      ctx.stroke();
-      ctx.strokeStyle = '#9461ff';
-      ctx.lineWidth = 8;
-      ctx.stroke();
-      ctx.strokeStyle = '#e6dcff';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-    }
-
-    // The next turn, raised off the map: a white arrow bent along the route.
-    if (this.turnArrow) {
-      const pts = [];
-      for (let i = 0; i < this.turnArrow.length; i += 2) {
-        const q = toScreen(this.turnArrow[i], this.turnArrow[i + 1]);
-        if (q) pts.push(q);
-      }
-      if (pts.length >= 2) {
-        const tip = pts[pts.length - 1];
-        let back = pts[pts.length - 2];
-        for (let i = pts.length - 2; i >= 0 && Math.hypot(tip[0] - back[0], tip[1] - back[1]) < 6; i--) back = pts[i];
-        const a = Math.atan2(tip[1] - back[1], tip[0] - back[0]);
-        for (const [lift, color] of [[5, '#3a2a80'], [0, '#ffffff']]) {
-          ctx.beginPath();
-          pts.forEach((q, i) => (i ? ctx.lineTo(q[0], q[1] + lift) : ctx.moveTo(q[0], q[1] + lift)));
-          ctx.strokeStyle = color;
-          ctx.lineWidth = 6;
-          ctx.stroke();
-          ctx.beginPath();
-          ctx.moveTo(tip[0] + Math.cos(a) * 16, tip[1] + Math.sin(a) * 20 + lift);
-          ctx.lineTo(tip[0] + Math.cos(a + 2.2) * 13, tip[1] + Math.sin(a + 2.2) * 13 + lift);
-          ctx.lineTo(tip[0] + Math.cos(a - 2.2) * 13, tip[1] + Math.sin(a - 2.2) * 13 + lift);
-          ctx.closePath();
-          ctx.fillStyle = color;
-          ctx.fill();
+      for (let i = 1; i < path.length; i++) {
+        const [x0, y0] = path[i - 1], [x1, y1] = path[i];
+        const len = Math.hypot(x1 - x0, y1 - y0);
+        if (!len) continue;
+        for (; next <= len; next += gap) {
+          const x = x0 + (x1 - x0) * next / len, y = y0 + (y1 - y0) * next / len;
+          if (x < -10 || x > 610 || y < -10 || y > 610) continue;
+          ctx.moveTo(x + radius, y);
+          ctx.arc(x, y, radius, 0, 7);
         }
+        next -= len;
       }
+      ctx.fillStyle = guiding ? '#ffffff' : '#6fb1ff';
+      ctx.fill();
+      // A dark rim keeps white dots readable where they run along a pale street.
+      ctx.strokeStyle = guiding ? '#0e1b3d' : '#ffffff';
+      ctx.lineWidth = guiding ? 2 : 1.5;
+      ctx.stroke();
     }
 
-    // Street names: nearest first, skipping any that would overlap one already placed.
-    if (this.labels && cam.zoom >= 15) {
+    // Street names lie along their streets, in capitals on a dark plate. Nearest
+    // first; a name that would overlap one already placed is skipped.
+    if (this.labels && cam.zoom >= 14.5) {
+      const minRank = cam.zoom < 15.5 ? 2 : cam.zoom < 16.3 ? 1 : 0;
       const wanted = [];
       for (const tile of tiles) for (const l of tile.labels) {
-        if (l.x < x0 || l.x > x1 || l.y < y0 || l.y > y1) continue;
-        const q = toScreen(l.x, l.y);
-        if (!q || q[0] < 40 || q[0] > 560 || q[1] < 110 || q[1] > 520) continue;
-        if (Math.hypot(q[0] - ax, q[1] - ay) < 46) continue;   // keep the arrow clear
-        wanted.push({ name: l.name, q, order: Math.hypot(q[0] - ax, q[1] - ay) - l.rank * 60 });
+        if (l.rank < minRank || l.ax < x0 || l.ax > x1 || l.ay < y0 || l.ay > y1) continue;
+        const a = toScreen(l.ax, l.ay), b = toScreen(l.bx, l.by);
+        if (!a || !b) continue;
+        const q = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+        if (Math.hypot(q[0] - mask.x, q[1] - mask.y) > mask.r * 0.82 || q[1] < 135 || q[1] > 470) continue;
+        if (Math.hypot(q[0] - ax, q[1] - ay) < 46) continue;   // keep the marker clear
+        let angle = Math.atan2(b[1] - a[1], b[0] - a[0]);
+        if (angle > Math.PI / 2) angle -= Math.PI;
+        if (angle < -Math.PI / 2) angle += Math.PI;
+        wanted.push({ name: l.name, q, angle, order: Math.hypot(q[0] - ax, q[1] - ay) - l.rank * 70 });
       }
       wanted.sort((a, b) => a.order - b.order);
-      ctx.font = '600 15px system-ui, sans-serif';
+      ctx.font = '600 14px system-ui, sans-serif';
+      if ('letterSpacing' in ctx) ctx.letterSpacing = '1px';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.lineWidth = 4;
-      ctx.strokeStyle = '#000';
-      ctx.fillStyle = '#eef0f5';
       const placed = [], names = new Set();
       for (const l of wanted) {
-        if (placed.length >= 7) break;
+        if (placed.length >= 6) break;
         if (names.has(l.name)) continue;
-        const half = ctx.measureText(l.name).width / 2 + 8;
-        if (placed.some((b) => Math.abs(b.q[0] - l.q[0]) < b.half + half && Math.abs(b.q[1] - l.q[1]) < 24)) continue;
+        const half = ctx.measureText(l.name).width / 2 + 7;
+        if (placed.some((p) => Math.hypot(p.q[0] - l.q[0], p.q[1] - l.q[1]) < p.half + half)) continue;
         placed.push({ q: l.q, half });
         names.add(l.name);
-        ctx.strokeText(l.name, l.q[0], l.q[1]);
-        ctx.fillText(l.name, l.q[0], l.q[1]);
+        ctx.save();
+        ctx.translate(l.q[0], l.q[1]);
+        ctx.rotate(l.angle);
+        ctx.fillStyle = 'rgba(8,16,40,.85)';
+        ctx.fillRect(-half, -11, half * 2, 22);
+        ctx.fillStyle = '#dfe6fa';
+        ctx.fillText(l.name, 0, 1);
+        ctx.restore();
       }
+      if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
     }
 
     for (const pin of this.pins) {
@@ -511,7 +510,7 @@ export class MapView {
       if (!q) continue;
       ctx.beginPath();
       ctx.arc(q[0], q[1], pin.active ? 17 : 13, 0, 7);
-      ctx.fillStyle = pin.active ? '#ffffff' : '#3d9bff';
+      ctx.fillStyle = pin.active ? '#ffffff' : '#4f8dff';
       ctx.fill();
       ctx.fillStyle = pin.active ? '#0b1220' : '#ffffff';
       ctx.font = `700 ${pin.active ? 18 : 15}px system-ui, sans-serif`;
@@ -520,66 +519,52 @@ export class MapView {
       ctx.fillText(pin.label, q[0], q[1] + 1);
     }
 
+    // Destination: a blue dot in a white ring.
     if (this.dest) {
       const q = toScreen(this.dest.x, this.dest.y);
       if (q) {
         ctx.beginPath();
-        ctx.arc(q[0], q[1], 13, 0, 7);
+        ctx.arc(q[0], q[1], 12.5, 0, 7);
         ctx.fillStyle = '#ffffff';
         ctx.fill();
         ctx.beginPath();
-        ctx.arc(q[0], q[1], 6, 0, 7);
-        ctx.fillStyle = '#ff5a4f';
+        ctx.arc(q[0], q[1], 8.5, 0, 7);
+        ctx.fillStyle = '#2f7bff';
         ctx.fill();
       }
     }
 
+    // The wearer: a white ring lying on the map with an arrow for where they face.
     if (this.puck) {
       const q = toScreen(this.puck.x, this.puck.y);
-      if (q && this.puck.arrow) {
-        // A small arrow lying on the map, pointing the way the wearer faces.
-        const dx = (this.puck.x - cx) * S, dy = (this.puck.y - cy) * S;
-        const gx = dx * cosB + dy * sinB, gy = -dx * sinB + dy * cosB;
-        const a = ((this.puck.heading == null ? cam.bearing : this.puck.heading) - cam.bearing) * Math.PI / 180;
-        const cosA = Math.cos(a), sinA = Math.sin(a);
-        const pts = [[0, -24], [17, 19], [0, 9], [-17, 19]].map(([x, y]) => project(gx + x * cosA - y * sinA, gy + x * sinA + y * cosA));
-        for (const [lift, fillColor] of [[5, '#5b3fb3'], [0, '#ffffff']]) {
-          ctx.beginPath();
-          pts.forEach((v, i) => (i ? ctx.lineTo(v[0], v[1] + lift) : ctx.moveTo(v[0], v[1] + lift)));
-          ctx.closePath();
-          ctx.fillStyle = fillColor;
-          ctx.fill();
-        }
-        ctx.strokeStyle = '#2a1d5c';
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-      } else if (q) {
+      if (q) {
         const halo = clamp((this.puck.accuracy || 0) / this.metersPerPixel(), 0, 90);
-        if (halo > 18) {
+        if (halo > 28) {
           ctx.beginPath();
           ctx.arc(q[0], q[1], halo, 0, 7);
-          ctx.fillStyle = 'rgba(61,155,255,.16)';
+          ctx.fillStyle = 'rgba(79,141,255,.14)';
           ctx.fill();
         }
-        if (this.puck.heading != null) {
-          const a = (this.puck.heading - cam.bearing - 90) * Math.PI / 180;
-          const cone = ctx.createRadialGradient(q[0], q[1], 8, q[0], q[1], 58);
-          cone.addColorStop(0, 'rgba(120,190,255,.75)');
-          cone.addColorStop(1, 'rgba(120,190,255,0)');
-          ctx.beginPath();
-          ctx.moveTo(q[0], q[1]);
-          ctx.arc(q[0], q[1], 58, a - 0.5, a + 0.5);
-          ctx.closePath();
-          ctx.fillStyle = cone;
-          ctx.fill();
-        }
+        const squash = tilted ? Math.max(0.62, cosP + 0.12) : 1;
         ctx.beginPath();
-        ctx.arc(q[0], q[1], 14, 0, 7);
-        ctx.fillStyle = '#ffffff';
+        ctx.ellipse(q[0], q[1], 21, 21 * squash, 0, 0, 7);
+        ctx.fillStyle = '#101d42';
         ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 4;
+        ctx.stroke();
         ctx.beginPath();
-        ctx.arc(q[0], q[1], 10, 0, 7);
-        ctx.fillStyle = '#2f8cff';
+        if (this.puck.heading == null) {
+          ctx.arc(q[0], q[1], 5, 0, 7);
+        } else {
+          const a = (this.puck.heading - cam.bearing) * Math.PI / 180, cosA = Math.cos(a), sinA = Math.sin(a);
+          [[0, -12], [8.5, 9], [0, 4.5], [-8.5, 9]].forEach(([x, y], i) => {
+            const px = q[0] + x * cosA - y * sinA, py = q[1] + (x * sinA + y * cosA) * squash;
+            if (i) ctx.lineTo(px, py); else ctx.moveTo(px, py);
+          });
+          ctx.closePath();
+        }
+        ctx.fillStyle = '#ffffff';
         ctx.fill();
       }
     }
