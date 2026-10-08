@@ -3,7 +3,7 @@ import { RouteGuide } from './guide.js';
 import { searchPlaces, fetchRoute, MODES } from './services.js';
 import { lonToX, latToY, xToLon, yToLat, distance, bearing, angleDiff, formatDistance, formatDuration, EARTH_CIRCUMFERENCE } from './geo.js';
 
-const APP_VERSION = '2.5';
+const APP_VERSION = '2.6';
 
 // The app is static and can live on any host. The phone relay is a server
 // function, so it and the phone page stay on Netlify.
@@ -133,7 +133,7 @@ function renderStatus() {
 const input = { keys: 0, last: '-' };
 function renderDebug() {
   const { loaded, failed } = map.store.stats;
-  const where = (state.fix ? `ok ±${Math.round(state.fix.accuracy)}m` : loc.error ? loc.error.slice(0, 6) : locPending ? 'asking' : 'idle') + (preciseLocation ? ' gps' : ' net');
+  const where = (state.fix ? `ok ±${Math.round(state.fix.accuracy)}m` : loc.error ? loc.error.slice(0, 6) : locPending ? 'asking' : 'idle');
   const focus = document.activeElement && (document.activeElement.id || document.activeElement.textContent.trim().slice(0, 10)) || 'none';
   $('debug').textContent = `v${APP_VERSION} · loc ${where} ×${loc.errors || 0} · perm ${permission} · map ${loaded}/${failed} · key ${input.keys} ${input.last} · at ${focus}${navigator.onLine ? '' : ' · offline'}`;
 }
@@ -156,7 +156,7 @@ function activate(screen) {
   if (document.activeElement && document.activeElement.id) lastFocus[leaving] = document.activeElement.id;
   const guiding = ['nav', 'steps', 'arrived'];
   if (guiding.includes(leaving) && !guiding.includes(screen)) stopGuidance();
-  if (screen !== 'nav') state.look = false;
+  if (screen !== 'nav' && state.look) applyLook(false);
   state.screen = screen;
   for (const el of document.querySelectorAll('.screen')) el.classList.toggle('active', el.id === screen);
   $('boot').hidden = true;
@@ -182,6 +182,7 @@ const ENTRY_SCREENS = ['type', 'phone'];
 let locPending = false, historyBehind = false;
 
 function go(screen) {
+  unwinding = false;
   if (locPending) {
     historyBehind = true;
     activate(screen);
@@ -200,12 +201,23 @@ function catchUpHistory() {
   if (state.screen !== 'home' && depth === 0) history.pushState({ screen: state.screen, depth: 1 }, '');
 }
 
+// Home is shown at once. History is then walked back one step at a time,
+// because jumping several entries in one call does not work on every host.
+let unwinding = false;
+
 function goHome() {
-  const depth = history.state && history.state.depth || 0;
-  if (depth > 0) history.go(-depth); else activate('home');
+  activate('home');
+  if (history.state && history.state.depth > 0) {
+    unwinding = true;
+    history.back();
+  }
 }
 
 window.addEventListener('popstate', (e) => {
+  if (unwinding) {
+    if (e.state && e.state.depth > 0) history.back(); else unwinding = false;
+    return;
+  }
   const screen = e.state && e.state.screen || 'home';
   // Guidance cannot be resumed by Back or Forward, only started from Start.
   activate(((screen === 'nav' || screen === 'steps') && !state.guide) || (screen === 'place' && !state.place) ? 'home' : screen);
@@ -326,73 +338,62 @@ function onFix(lat, lon, accuracy, course = null) {
   renderStatus();
 }
 
-// Coarse first: the phone answers it from the network within seconds, indoors
-// too. Precise follows once there is a position to show.
-let watchStartedAt = 0, preciseLocation = false, locBusy = false, locTimer = 0, preciseFailedAt = 0;
-// After a failure, try the other kind; a failed precise request is not retried for a minute.
-function otherKind() {
-  if (preciseLocation) preciseFailedAt = Date.now();
-  preciseLocation = !preciseLocation && Date.now() - preciseFailedAt > 60000;
-}
+let watchId = null, watchStartedAt = 0, locTimer = 0, watchdog = 0;
 let permission = 'unknown';   // 'granted' | 'prompt' | 'denied' | 'unknown'
+const burst = { n: 0, at: 0 };
+let statusAt = 0;
 
-// Position comes from one-shot requests in a loop, never more than one at a
-// time. A standing watch can fire its error callback without pause when the
-// phone has no position to give, which starves the app of time to take input;
-// a loop cannot be driven faster than it chooses to ask.
+// A standing watch, set up exactly as in the first version: on the glasses it
+// delivers a position within seconds, where one-shot requests can go unanswered
+// for a minute. Two guards around it: an error flood stops the watch for a few
+// seconds, and a watch that goes quiet is started again.
 function startLocation() {
   if (FIXED) { onFix(FIXED.lat, FIXED.lon, 8); return; }
   if (!navigator.geolocation) { loc.error = 'geolocation not supported'; renderStatus(); return; }
-  if (locBusy) return;
   clearTimeout(locTimer);
-  locBusy = true;
+  if (watchId != null) navigator.geolocation.clearWatch(watchId);
   locPending = !state.fix;
   watchStartedAt = Date.now();
   loc.asked = (loc.asked || 0) + 1;
-
-  let settled = false;
-  const settle = (delay) => {
-    if (settled) return false;
-    settled = true;
-    clearTimeout(guard);
-    locBusy = false;
-    if (locPending) { locPending = false; catchUpHistory(); }
-    locTimer = setTimeout(startLocation, delay);
-    return true;
+  const answered = () => {
+    if (!locPending) return;
+    locPending = false;
+    catchUpHistory();
   };
-  // A request the host never answers must not stall the loop.
-  const guard = setTimeout(() => {
-    if (!settle(3000)) return;
-    loc.errors = (loc.errors || 0) + 1;
-    loc.error = 'code 3: no answer';
-    otherKind();
-    renderStatus();
-  }, 14000);
-
-  navigator.geolocation.getCurrentPosition(
+  const quiet = () => {
+    clearTimeout(watchdog);
+    watchdog = setTimeout(() => { if (Date.now() - loc.lastAt > 24000) startLocation(); }, 25000);
+  };
+  watchId = navigator.geolocation.watchPosition(
     (p) => {
-      if (!settle(state.guide ? 1000 : 2500)) return;
+      answered();
       loc.fixes++;
       loc.error = '';
       loc.lastAt = Date.now();
       if (!settings.locOk) { settings.locOk = true; saveSettings(); }
-      preciseLocation = Date.now() - preciseFailedAt > 60000;
+      quiet();
       onFix(p.coords.latitude, p.coords.longitude, p.coords.accuracy);
     },
     (err) => {
-      if (!settle(err.code === 1 ? 8000 : 3000)) return;
+      answered();
+      const now = Date.now();
       loc.errors = (loc.errors || 0) + 1;
-      loc.error = `code ${err.code}: ${err.message}`;
-      if (err.code === 1 && settings.locOk) { settings.locOk = false; saveSettings(); }
-      // No position this way: try the other way next (precise needs GPS, coarse
-      // is answered from the network).
-      if (err.code !== 1) otherKind();
-      renderStatus();
+      const text = `code ${err.code}: ${err.message}`;
+      const changed = text !== loc.error;
+      loc.error = text;
+      // Errors arriving in a stream would leave no time for input: stop, breathe, start again.
+      if (now - burst.at < 1000) burst.n++; else { burst.n = 1; burst.at = now; }
+      if (burst.n > 8) {
+        navigator.geolocation.clearWatch(watchId);
+        watchId = null;
+        clearTimeout(watchdog);
+        locTimer = setTimeout(startLocation, 5000);
+      }
+      if (changed || now - statusAt > 1000) { statusAt = now; renderStatus(); }
     },
-    preciseLocation
-      ? { enableHighAccuracy: true, timeout: 12000, maximumAge: 3000 }
-      : { enableHighAccuracy: false, timeout: 12000, maximumAge: 300000 },
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 2000 },
   );
+  quiet();
   renderStatus();
 }
 
@@ -884,7 +885,7 @@ function startGuidance() {
   state.offCount = 0;
   state.progress = null;
   lastFocus.nav = 'compass';
-  state.look = false;
+  applyLook(false);
   saveSettings();
   go('nav');
   speak(spoken(state.route.maneuvers[0]));
@@ -906,7 +907,7 @@ function stopGuidance() {
   clearInterval(demoTimer);
   state.guide = null;
   state.progress = null;
-  state.look = false;
+  applyLook(false);
   if ('speechSynthesis' in window) speechSynthesis.cancel();
   if (FIXED) onFix(FIXED.lat, FIXED.lon, 8);
 }
@@ -1058,10 +1059,16 @@ $('details').addEventListener('click', () => {
 });
 
 // Look around: the map lets go of the wearer and the arrows move it. Select returns.
-function setLook(on) {
-  if (state.look === on) return;
+function applyLook(on) {
   state.look = on;
-  $('look-hint').textContent = on ? 'Swipe to move the map. Select to go back.' : 'Swipe up to look around';
+  $('look-hint').textContent = on ? 'Swipe to move the map' : 'Swipe up to look around';
+  $('look-exit').hidden = !on;
+  $('look').classList.toggle('looking', on);
+  document.querySelector('#nav .dock').hidden = on;
+}
+function setLook(on) {
+  if (Boolean(state.look) === on) return;
+  applyLook(on);
   if (on) map.setCamera({ pitch: 0, zoom: 16.5 });
   refresh();
 }
@@ -1117,7 +1124,7 @@ function renderDiagnostics() {
     `Screen ${innerWidth}×${innerHeight} @${devicePixelRatio}`,
     `Location: ${loc.fixes} fixes${state.fix ? `, ±${Math.round(state.fix.accuracy)} m, ${Math.round((Date.now() - loc.lastAt) / 1000)} s ago` : ''}`,
     `Location error: ${loc.error || 'none'}`,
-    `Location permission: ${permission}, asked ${loc.asked || 0}×, ${preciseLocation ? 'precise' : 'coarse'}`,
+    `Location permission: ${permission}, asked ${loc.asked || 0}×`,
     state.fix ? `Position: ${state.fix.lat.toFixed(4)}, ${state.fix.lon.toFixed(4)}` : 'Position: none',
     `Compass: ${compass.events} readings`,
     `Map tiles: ${loaded} loaded, ${failed} failed`,
