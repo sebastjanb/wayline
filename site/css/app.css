@@ -188,3 +188,8 @@ h1 { margin: 0; padding: 22px 30px 12px; font-size: 24px; font-weight: 700; colo
   display: none; pointer-events: none;
 }
 #toast.show { display: block; }
+
+/* Unseen buttons over the landmark pins: only their focus ring shows. */
+#pins { position: absolute; top: 0; left: 0; width: 0; height: 0; }
+.pin { position: absolute; top: 0; left: 0; width: 44px; height: 44px; padding: 0; border-radius: 22px; background: transparent; }
+.pin:focus { background: transparent; box-shadow: 0 0 0 3px #fff, 0 0 0 6px rgba(79, 141, 255, .7); }
