@@ -3,7 +3,7 @@ import { RouteGuide } from './guide.js';
 import { searchPlaces, fetchRoute, MODES } from './services.js';
 import { lonToX, latToY, xToLon, yToLat, distance, bearing, angleDiff, formatDistance, formatDuration, EARTH_CIRCUMFERENCE } from './geo.js';
 
-const APP_VERSION = '2.2';
+const APP_VERSION = '2.3';
 
 // The app is static and can live on any host. The phone relay is a server
 // function, so it and the phone page stay on Netlify.
@@ -109,7 +109,7 @@ function renderStatus() {
   if (lastError) text = 'Error: ' + lastError;
   else if (notAsked || denied) text = 'Location is off. Middle tap, Permissions, allow Location.';
   else if (!state.fix) {
-    text = loc.error.startsWith('code 2') ? 'No location from the phone yet. Still trying…'
+    text = loc.error.startsWith('code 2') ? 'The phone has no position yet. Still trying…'
       : loc.error.startsWith('code 3') ? 'Location is slow. Still trying…'
       : 'Finding your location…';
   }
@@ -124,9 +124,18 @@ function renderStatus() {
   if (!offer && document.activeElement === ask) $('open-type').focus();
 
   // Always on screen, so a fault can be read without opening any menu.
-  const where = state.fix ? `ok ±${Math.round(state.fix.accuracy)}m` : locPending ? 'asking' : loc.error ? loc.error.slice(0, 6) : 'idle';
-  $('debug').textContent = `v${APP_VERSION} · loc ${where} · perm ${permission} · map ${loaded}/${failed}${navigator.onLine ? '' : ' · offline'}`;
+  renderDebug();
   if (state.screen === 'diag') renderDiagnostics();
+}
+
+// loc: position state and how many requests failed. key: how many swipes and
+// selects reached the app, and the last one. at: which control has the focus.
+const input = { keys: 0, last: '-' };
+function renderDebug() {
+  const { loaded, failed } = map.store.stats;
+  const where = state.fix ? `ok ±${Math.round(state.fix.accuracy)}m` : loc.error ? loc.error.slice(0, 6) : locPending ? 'asking' : 'idle';
+  const focus = document.activeElement && (document.activeElement.id || document.activeElement.textContent.trim().slice(0, 10)) || 'none';
+  $('debug').textContent = `v${APP_VERSION} · loc ${where} ×${loc.errors || 0} · perm ${permission} · map ${loaded}/${failed} · key ${input.keys} ${input.last} · at ${focus}${navigator.onLine ? '' : ' · offline'}`;
 }
 
 function speak(text) {
@@ -231,7 +240,31 @@ function moveFocus(dx, dy) {
   }
 }
 
+// Select can reach the page as an Enter key, as a click, or as both. Enter is
+// turned into a click here, and a second click on the same control within a
+// moment is dropped, so one select is always exactly one press.
+let lastClick = { target: null, at: 0 };
+document.addEventListener('click', (e) => {
+  const button = e.target.closest && e.target.closest('button');
+  if (!button) return;
+  const now = Date.now();
+  if (button === lastClick.target && now - lastClick.at < 220) {
+    e.stopImmediatePropagation();
+    e.preventDefault();
+    return;
+  }
+  lastClick = { target: button, at: now };
+}, true);
+
 document.addEventListener('keydown', (e) => {
+  input.keys++;
+  input.last = e.key.replace('Arrow', '');
+  setTimeout(renderDebug, 0);
+  if (e.key === 'Enter' && document.activeElement && document.activeElement.tagName === 'BUTTON') {
+    e.preventDefault();
+    document.activeElement.click();
+    return;
+  }
   const arrows = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
   if (arrows[e.key] && state.look) {
     e.preventDefault();
@@ -266,29 +299,44 @@ function onFix(lat, lon, accuracy, course = null) {
   renderStatus();
 }
 
-let watchId = null, watchStartedAt = 0, preciseLocation = true;
+let watchStartedAt = 0, preciseLocation = true, locBusy = false, locTimer = 0;
 let permission = 'unknown';   // 'granted' | 'prompt' | 'denied' | 'unknown'
 
-// One standing request. Asking again is rate-limited and only happens on an
-// explicit action: repeated requests can stack native prompts on the glasses
-// and leave the app unable to take input.
-function startLocation(again = false) {
+// Position comes from one-shot requests in a loop, never more than one at a
+// time. A standing watch can fire its error callback without pause when the
+// phone has no position to give, which starves the app of time to take input;
+// a loop cannot be driven faster than it chooses to ask.
+function startLocation() {
   if (FIXED) { onFix(FIXED.lat, FIXED.lon, 8); return; }
   if (!navigator.geolocation) { loc.error = 'geolocation not supported'; renderStatus(); return; }
-  if (watchId != null && !again) return;
-  if (Date.now() - watchStartedAt < 5000) return;
+  if (locBusy) return;
+  clearTimeout(locTimer);
+  locBusy = true;
+  locPending = !state.fix;
   watchStartedAt = Date.now();
-  if (watchId != null) navigator.geolocation.clearWatch(watchId);
   loc.asked = (loc.asked || 0) + 1;
-  locPending = true;
-  const answered = () => {
-    if (!locPending) return;
-    locPending = false;
-    catchUpHistory();
+
+  let settled = false;
+  const settle = (delay) => {
+    if (settled) return false;
+    settled = true;
+    clearTimeout(guard);
+    locBusy = false;
+    if (locPending) { locPending = false; catchUpHistory(); }
+    locTimer = setTimeout(startLocation, delay);
+    return true;
   };
-  watchId = navigator.geolocation.watchPosition(
+  // A request the host never answers must not stall the loop.
+  const guard = setTimeout(() => {
+    if (!settle(3000)) return;
+    loc.errors = (loc.errors || 0) + 1;
+    loc.error = 'code 3: no answer';
+    renderStatus();
+  }, 20000);
+
+  navigator.geolocation.getCurrentPosition(
     (p) => {
-      answered();
+      if (!settle(state.guide ? 1000 : 2500)) return;
       loc.fixes++;
       loc.error = '';
       loc.lastAt = Date.now();
@@ -296,21 +344,16 @@ function startLocation(again = false) {
       onFix(p.coords.latitude, p.coords.longitude, p.coords.accuracy);
     },
     (err) => {
-      answered();
+      if (!settle(err.code === 1 ? 8000 : 3000)) return;
+      loc.errors = (loc.errors || 0) + 1;
       loc.error = `code ${err.code}: ${err.message}`;
       if (err.code === 1 && settings.locOk) { settings.locOk = false; saveSettings(); }
-      // No precise fix (slow on mobile data, or indoors): settle for a coarse
-      // one, which the phone can answer from the network. Once only.
-      if (err.code !== 1 && !state.fix && preciseLocation) {
-        preciseLocation = false;
-        watchStartedAt = 0;
-        startLocation(true);
-      }
+      // No position this way: try the other way next (precise needs GPS, coarse
+      // is answered from the network).
+      if (err.code !== 1) preciseLocation = !preciseLocation;
       renderStatus();
     },
-    preciseLocation
-      ? { enableHighAccuracy: true, timeout: 15000, maximumAge: 5000 }
-      : { enableHighAccuracy: false, timeout: 30000, maximumAge: 120000 },
+    { enableHighAccuracy: preciseLocation, timeout: 12000, maximumAge: 3000 },
   );
   renderStatus();
 }
@@ -326,7 +369,7 @@ function beginLocation() {
   let query = null;
   try { query = navigator.permissions && navigator.permissions.query && navigator.permissions.query({ name: 'geolocation' }); } catch {}
   const begin = () => {
-    if (permission !== 'denied') startLocation();
+    startLocation();
     renderStatus();
     setInterval(keepTryingLocation, 4000);
   };
@@ -336,27 +379,18 @@ function beginLocation() {
     permission = status.state;
     status.onchange = () => {
       permission = status.state;
-      if (permission === 'granted' && !state.fix) startLocation(true);
+      if (permission === 'granted' && !state.fix) startLocation();
       renderStatus();
     };
     begin();
   }).catch(begin);
 }
 
+// The request loop retries by itself; this only keeps the permission reading
+// and the on-screen status fresh.
 function keepTryingLocation() {
-  if (state.fix || FIXED) return;
-  if (permissionStatus) {
-    // Reading the state raises no prompt, so it is safe to do often.
-    const was = permission;
-    permission = permissionStatus.state;
-    const refused = loc.error.startsWith('code 1');
-    if ((permission === 'granted' && (refused || !loc.asked)) || (was === 'denied' && permission !== 'denied')) startLocation(true);
-  } else if (loc.error.startsWith('code 1') && locationRetries < 40) {
-    // No way to read the permission here: ask again now and then, sparingly.
-    locationRetries++;
-    if (locationRetries % 2 === 0) startLocation(true);
-  }
-  renderStatus();
+  if (permissionStatus) permission = permissionStatus.state;
+  if (!state.fix && !FIXED) renderStatus();
 }
 
 let lastAimAt = 0;
@@ -1038,7 +1072,7 @@ $('mute').addEventListener('click', () => {
 $('recenter').addEventListener('click', async () => {
   state.follow = true;
   await startCompass();
-  if (!state.fix) startLocation(true);   // ask again: a select gesture may be what the prompt was waiting for
+  if (!state.fix) startLocation();   // ask again: a select gesture may be what the prompt was waiting for
   refresh();
 });
 $('zoom-in').addEventListener('click', () => zoomHome(1));
@@ -1135,7 +1169,7 @@ activate('home');
 renderStatus();
 beginLocation();
 $('enable-location').addEventListener('click', () => {
-  startLocation(true);
+  startLocation();
   toast('Asking for location…', 2000);
 });
 window.addEventListener('online', renderStatus);

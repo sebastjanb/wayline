@@ -89,7 +89,7 @@ h1 { margin: 0; padding: 22px 30px 12px; font-size: 24px; font-weight: 700; colo
 .status:empty { display: none; }
 .enable { position: absolute; left: 170px; width: 260px; top: 330px; }
 .enable[hidden] { display: none; }
-.debug { position: absolute; left: 16px; bottom: 16px; max-width: 380px; font-size: 16px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.debug { position: absolute; left: 12px; right: 12px; bottom: 14px; font-size: 15px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* Own keyboard: letters and numbers on separate pages so every key fits */
 #query { position: absolute; top: 12px; left: 12px; right: 12px; width: 576px; height: 60px; font-size: 24px; border-radius: 20px; -webkit-user-select: text; user-select: text; }
