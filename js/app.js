@@ -3,7 +3,7 @@ import { RouteGuide } from './guide.js';
 import { searchPlaces, fetchRoute, MODES } from './services.js';
 import { lonToX, latToY, distance, bearing, angleDiff, formatDistance, formatDuration, EARTH_CIRCUMFERENCE } from './geo.js';
 
-const APP_VERSION = '1.11';
+const APP_VERSION = '2.0';
 
 // The app is static and can live on any host. The phone relay is a server
 // function, so it and the phone page stay on Netlify.
@@ -50,6 +50,17 @@ const ARRIVE_WITHIN = { pedestrian: 12, bicycle: 18, auto: 30 };
 let lastError = '';
 window.addEventListener('error', (e) => { lastError = e.message || 'script error'; renderStatus(); });
 window.addEventListener('unhandledrejection', (e) => { lastError = String(e.reason && e.reason.message || e.reason); renderStatus(); });
+
+// Sets every element bound to a name: the turn card shows on two screens.
+function bind(name, value, html = false) {
+  for (const el of document.querySelectorAll(`[data-bind="${name}"]`)) {
+    if (html) el.innerHTML = value; else el.textContent = value;
+  }
+}
+
+// Netlify's free plan draws a badge in the bottom-right corner; keep clear of it.
+if (location.hostname.endsWith('netlify.app')) document.body.classList.add('host-badge');
+const EDGE = document.body.classList.contains('host-badge') ? 42 : 0;
 
 const map = new MapView($('map'));
 map.onTiles = () => renderStatus();
@@ -135,7 +146,9 @@ function speak(text) {
 function activate(screen) {
   const leaving = state.screen;
   if (document.activeElement && document.activeElement.id) lastFocus[leaving] = document.activeElement.id;
-  if (leaving === 'nav' && screen !== 'nav' && screen !== 'arrived') stopGuidance();
+  const guiding = ['nav', 'steps', 'arrived'];
+  if (guiding.includes(leaving) && !guiding.includes(screen)) stopGuidance();
+  if (screen !== 'nav') state.look = false;
   state.screen = screen;
   for (const el of document.querySelectorAll('.screen')) el.classList.toggle('active', el.id === screen);
   toast('');
@@ -185,7 +198,7 @@ function goHome() {
 window.addEventListener('popstate', (e) => {
   const screen = e.state && e.state.screen || 'home';
   // Guidance cannot be resumed by Back or Forward, only started from Start.
-  activate((screen === 'nav' && !state.guide) || (screen === 'place' && !state.place) ? 'home' : screen);
+  activate(((screen === 'nav' || screen === 'steps') && !state.guide) || (screen === 'place' && !state.place) ? 'home' : screen);
 });
 
 // ------------------------------------------------------- directional input
@@ -221,7 +234,10 @@ function moveFocus(dx, dy) {
 
 document.addEventListener('keydown', (e) => {
   const arrows = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
-  if (arrows[e.key]) {
+  if (arrows[e.key] && state.look) {
+    e.preventDefault();
+    map.panBy(-arrows[e.key][0] * 90, -arrows[e.key][1] * 90);
+  } else if (arrows[e.key]) {
     e.preventDefault();
     moveFocus(...arrows[e.key]);
   } else if (e.key === 'Escape' || (e.key === 'Backspace' && e.target.tagName !== 'INPUT')) {
@@ -395,6 +411,7 @@ function aimCamera() {
   } else if (screen === 'nav' && map.puck) {
     map.puck.heading = head;
     if (head == null && progress) map.puck.heading = progress.course;
+    if (state.look) { map.requestRender(); return; }   // looking around: the wearer moves the map
     const up = settings.headingUp;
     map.setCamera({
       x: map.puck.x, y: map.puck.y, zoom: up ? 17.6 : 17,
@@ -407,36 +424,35 @@ function aimCamera() {
 function refresh() {
   const { screen, fix, route, place, progress } = state;
   map.visible = screen === 'home' || screen === 'place' || screen === 'nav';
+  map.routeStyle = screen === 'nav' ? 'guide' : 'preview';
   map.pins = [];
   map.route = null;
   map.routeFrom = null;
   map.dest = null;
-  map.turnArrow = null;
-  map.labels = screen === 'nav';
+  map.labels = true;
   map.puck = fix ? { ...world(fix), accuracy: fix.accuracy, heading: facing() } : null;
 
   if (screen === 'home') {
     map.setLayout({ x: 300, y: 280 }, { x: 300, y: 280, r: 280 });
     if (!fix && settings.last && state.follow) map.setCamera({ ...world(settings.last), zoom: state.homeZoom, pitch: 0, bearing: 0 });
   } else if (screen === 'place' && place) {
-    map.setLayout({ x: 300, y: 250 }, { x: 300, y: 250, r: 215 });
+    const cy = 232 - EDGE / 2;
+    map.setLayout({ x: 300, y: cy }, { x: 300, y: cy, r: 250 - EDGE / 2 });
     map.dest = world(place);
     if (route) {
       map.route = route.world;
-      map.setCamera({ ...map.fit(route.world, 235), pitch: 0, bearing: 0 });
+      map.setCamera({ ...map.fit(route.world, 250 - EDGE), pitch: 0, bearing: 0 });
     } else {
       map.setCamera({ ...map.dest, zoom: 16, pitch: 0, bearing: 0 });
     }
   } else if (screen === 'nav' && route) {
     // Guidance fills the lens: streets run from the arrow up to the horizon.
     const up = settings.headingUp;
-    map.setLayout({ x: 300, y: up ? 410 : 310 }, { x: 300, y: 300, r: 400, top: up ? 40 : null });
-    map.puck.arrow = true;
+    map.setLayout({ x: 300, y: (up ? 400 : 320) - EDGE / 2 }, { x: 300, y: 300, r: 400, top: up ? 90 : null });
     map.route = route.world;
     map.dest = world(place);
     if (progress) {
       map.routeFrom = { index: progress.index, x: progress.x, y: progress.y };
-      map.turnArrow = state.turnArrow;
       // Ride the route line while the fix agrees with it, so the puck does not jitter.
       if (progress.off < 25) { map.puck.x = progress.x; map.puck.y = progress.y; }
     }
@@ -673,17 +689,27 @@ for (const chip of document.querySelectorAll('[data-category]')) {
 // -------------------------------------------------------------- place card
 
 const modeLabel = () => MODES.find((m) => m.id === settings.mode).label;
+const clock = (date) => date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+function renderModes() {
+  for (const button of document.querySelectorAll('#modes button')) button.classList.toggle('on', button.dataset.mode === settings.mode);
+}
 
 function openPlace(place) {
   state.place = place;
   state.route = null;
   $('place-name').textContent = place.name;
-  $('place-detail').textContent = place.detail || '';
-  $('place-detail').hidden = !place.detail;
-  $('mode').textContent = modeLabel();
+  renderModes();
   lastFocus.place = 'start';
   go('place');
   return loadRoute();
+}
+
+// Big number on the card: minutes below an hour, hours and minutes above.
+function showTravelTime(seconds) {
+  const minutes = Math.max(1, Math.round(seconds / 60));
+  $('place-min').textContent = minutes < 60 ? minutes : `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, '0')}`;
+  $('place-unit').textContent = minutes < 60 ? 'min' : 'h';
 }
 
 async function loadRoute() {
@@ -691,6 +717,9 @@ async function loadRoute() {
   const { place, fix } = state;
   state.route = null;
   $('start').disabled = true;
+  $('place-min').textContent = '–';
+  $('place-unit').textContent = 'min';
+  $('place-eta').textContent = '';
   state.routeWaiting = !fix;
   if (!fix) { $('place-summary').textContent = 'Waiting for location…'; return false; }
   $('place-summary').textContent = 'Finding route…';
@@ -698,27 +727,33 @@ async function loadRoute() {
     const route = await fetchRoute(fix, place, settings.mode);
     if (token !== state.routeToken) return false;
     state.route = route;
-    $('place-summary').textContent = `${formatDuration(route.time)} · ${formatDistance(route.total, settings.imperial)}`;
+    showTravelTime(route.time);
+    $('place-summary').textContent = `${modeLabel()} ${formatDistance(route.total, settings.imperial)}`;
+    $('place-eta').textContent = `ETA ${clock(new Date(Date.now() + route.time * 1000))}`;
     $('start').disabled = false;
     if (state.screen === 'place') {
-      if (document.activeElement === document.body || document.activeElement === $('mode')) $('start').focus();
+      if (document.activeElement === document.body) $('start').focus();
       refresh();
     }
     return true;
   } catch {
     if (token !== state.routeToken) return false;
     $('place-summary').textContent = `No ${modeLabel().toLowerCase()} route found`;
-    if (state.screen === 'place') $('mode').focus();
+    if (state.screen === 'place') { refresh(); if (document.activeElement === document.body) document.querySelector('#modes .on').focus(); }
     return false;
   }
 }
 
-$('mode').addEventListener('click', () => {
-  settings.mode = MODES[(MODES.findIndex((m) => m.id === settings.mode) + 1) % MODES.length].id;
-  saveSettings();
-  $('mode').textContent = modeLabel();
-  loadRoute();
-});
+for (const button of document.querySelectorAll('#modes button')) {
+  button.addEventListener('click', () => {
+    if (settings.mode === button.dataset.mode) return;
+    settings.mode = button.dataset.mode;
+    saveSettings();
+    renderModes();
+    loadRoute();
+    refresh();
+  });
+}
 
 $('start').addEventListener('click', async () => {
   // History must not change until the permission prompt has been answered.
@@ -736,7 +771,8 @@ function startGuidance() {
   state.said = {};
   state.offCount = 0;
   state.progress = null;
-  lastFocus.nav = 'exit';
+  lastFocus.nav = 'compass';
+  state.look = false;
   saveSettings();
   go('nav');
   speak(spoken(state.route.maneuvers[0]));
@@ -758,7 +794,7 @@ function stopGuidance() {
   clearInterval(demoTimer);
   state.guide = null;
   state.progress = null;
-  state.turnArrow = null;
+  state.look = false;
   if ('speechSynthesis' in window) speechSynthesis.cancel();
   if (FIXED) onFix(FIXED.lat, FIXED.lon, 8);
 }
@@ -795,9 +831,6 @@ function guide() {
   state.progress = p;
   const mode = route.mode;
 
-  const turnAt = p.next && !isArrival(p.next) ? p.along + p.toNext : null;
-  state.turnArrow = turnAt != null && p.toNext < 150 ? state.guide.slice(Math.max(p.along, turnAt - 22), turnAt + 24) : null;
-
   if (p.remaining < ARRIVE_WITHIN[mode]) {
     const last = route.maneuvers[route.maneuvers.length - 1];
     speak(spoken(last));
@@ -815,12 +848,12 @@ function guide() {
   if (state.offCount >= 3 && !state.rerouting && Date.now() - state.rerouteAt > 8000) reroute();
 
   const next = p.next || p.current;
-  $('turn-icon').innerHTML = turnIcon(next.type);
-  $('turn-distance').textContent = formatDistance(p.toNext, settings.imperial);
-  $('turn-street').textContent = turnLabel(next);
-  const eta = new Date(Date.now() + p.secondsLeft * 1000);
-  $('nav-eta').innerHTML = `${eta.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} arrival` +
-    `<small>${formatDuration(p.secondsLeft)} · ${formatDistance(p.remaining, settings.imperial)}</small>`;
+  bind('turn-icon', turnIcon(next.type), true);
+  bind('turn-street', turnLabel(next));
+  bind('turn-distance', formatDistance(p.toNext, settings.imperial));
+  bind('nav-min', formatDuration(p.secondsLeft));
+  bind('nav-arrive', `Arriving at ${clock(new Date(Date.now() + p.secondsLeft * 1000))}`);
+  if (state.screen === 'steps' && state.stepShown !== p.nextIndex) renderSteps();
 
   if (p.next && !isArrival(p.next)) {
     const [now, soon] = ANNOUNCE[mode];
@@ -878,6 +911,51 @@ function turnIcon(type) {
   return svg(`<path d="M32 58V${bendY}L${tx} ${ty}"/><path d="M${wing(0.6)}L${tx} ${ty}L${wing(-0.6)}"/>`);
 }
 
+// Step by step: every turn of the route, with the one coming up marked.
+function renderSteps() {
+  const { route, progress } = state;
+  const upcoming = progress ? progress.nextIndex : 1;
+  state.stepShown = upcoming;
+  const list = $('steps-list');
+  list.textContent = '';
+  route.maneuvers.forEach((m, i) => {
+    if (i === 0) return;   // the first entry is "start walking", not a turn
+    const button = document.createElement('button');
+    button.id = 'step-' + i;
+    button.className = i < upcoming ? 'done' : i === upcoming ? 'now' : '';
+    const dot = document.createElement('span');
+    dot.className = 'dot';
+    dot.innerHTML = turnIcon(m.type);
+    const what = document.createElement('span');
+    what.className = 'what';
+    what.textContent = isArrival(m) ? `Arrive at ${state.place.name}` : m.text.replace(/\.$/, '');
+    const far = document.createElement('span');
+    far.className = 'far';
+    far.textContent = formatDistance(route.cum[m.begin] - route.cum[route.maneuvers[i - 1].begin], settings.imperial);
+    button.append(dot, what, far);
+    list.append(button);
+  });
+  const current = $('step-' + Math.min(upcoming, route.maneuvers.length - 1));
+  if (current && state.screen === 'steps') { current.focus(); current.scrollIntoView({ block: 'center' }); }
+}
+
+$('details').addEventListener('click', () => {
+  lastFocus.steps = '';
+  go('steps');
+  renderSteps();
+});
+
+// Look around: the map lets go of the wearer and the arrows move it. Select returns.
+function setLook(on) {
+  if (state.look === on) return;
+  state.look = on;
+  $('look-hint').textContent = on ? 'Swipe to move the map. Select to go back.' : 'Swipe up to look around';
+  if (on) map.setCamera({ pitch: 0, zoom: 16.5 });
+  refresh();
+}
+$('look').addEventListener('focus', () => { if (state.screen === 'nav') setLook(true); });
+$('look').addEventListener('click', () => { setLook(false); $('compass').focus(); });
+
 $('exit').addEventListener('click', goHome);
 $('done').addEventListener('click', goHome);
 
@@ -885,17 +963,19 @@ $('compass').addEventListener('click', async () => {
   settings.headingUp = !settings.headingUp;
   saveSettings();
   if (settings.headingUp) await startCompass();
-  toast(settings.headingUp ? 'Map follows where you face' : 'North is up', 1600);
+  $('compass-label').textContent = settings.headingUp ? 'Facing' : 'North up';
   refresh();
 });
 
-function renderMute() { $('mute').classList.toggle('voice-off', !settings.voice); }
+function renderMute() {
+  $('mute').classList.toggle('voice-off', !settings.voice);
+  $('mute-label').textContent = settings.voice ? 'Sound on' : 'Muted';
+}
 $('mute').addEventListener('click', () => {
   settings.voice = !settings.voice;
   saveSettings();
   renderMute();
   if (!settings.voice && 'speechSynthesis' in window) speechSynthesis.cancel();
-  toast(settings.voice ? 'Voice on' : 'Voice off', 1400);
 });
 
 // ------------------------------------------------------------ home, settings
