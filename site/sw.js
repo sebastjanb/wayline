@@ -1,17 +1,20 @@
-// App shell comes from the network when there is one, so a new deploy shows up
-// on the next launch; the cached copy opens the app without a connection.
+// The app shell is one set of files that belong together. It is stored whole
+// under a versioned name and always served from that one set, so a weak
+// connection can never mix files from two versions. A new version is fetched
+// whole in the background and takes over only once every file has arrived.
 // Map tiles are kept too, so streets already seen still draw offline.
 
-const SHELL = 'wayline-shell-v19';
+const VERSION = '2.4';
+const SHELL = 'wayline-shell-' + VERSION;
 const TILES = 'wayline-tiles-v1';
 const MAX_TILES = 400;
 const FILES = [
-  './', 'index.html', 'css/app.css', 'manifest.webmanifest', 'favicon.png',
+  './', 'css/app.css', 'manifest.webmanifest', 'favicon.png',
   'js/app.js', 'js/map.js', 'js/mvt.js', 'js/geo.js', 'js/guide.js', 'js/services.js',
 ];
 
 self.addEventListener('install', (event) => {
-  // cache: 'reload' so a new version is never rebuilt from stale HTTP-cached files.
+  // cache: 'reload' so the new set is never built from stale HTTP-cached files.
   event.waitUntil(
     caches.open(SHELL)
       .then((cache) => cache.addAll(FILES.map((url) => new Request(url, { cache: 'reload' }))))
@@ -50,19 +53,10 @@ self.addEventListener('fetch', (event) => {
     return;
   }
   // The worker script itself must always come from the network, or updates stall.
-  if (url.origin !== self.location.origin || url.pathname.endsWith('/sw.js') || url.pathname.startsWith('/api/')) return;
-  // Network first, but a weak connection must not hold the app hostage: after
-  // four seconds the cached copy opens it and the fresh one lands for next time.
-  const fresh = fetch(request, { cache: 'no-cache' }).then((response) => {
-    if (response.ok) {
-      const copy = response.clone();
-      caches.open(SHELL).then((cache) => cache.put(request, copy));
-    }
-    return response;
-  });
-  const cached = () => caches.match(request, { ignoreSearch: true });
+  if (url.origin !== self.location.origin || url.pathname.endsWith('/sw.js')) return;
   event.respondWith(
-    Promise.race([fresh.catch(() => null), new Promise((resolve) => setTimeout(resolve, 4000))])
-      .then((response) => response || cached().then((hit) => hit || fresh)),
+    caches.open(SHELL)
+      .then((cache) => cache.match(request, { ignoreSearch: true }))
+      .then((hit) => hit || fetch(request)),
   );
 });

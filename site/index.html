@@ -14,6 +14,46 @@
 <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
+<div id="boot">Loading Wayline…</div>
+<script>
+// Runs before and apart from the app, so it still works when the app does not
+// start. It keeps the offline copy up to date, and repairs a broken copy: a
+// black screen with nothing on it must never be the end state.
+(function () {
+  var box = document.getElementById('boot'), problem = '';
+  window.addEventListener('error', function (e) { problem = e.message || 'a file did not load'; }, true);
+  var started = function () { return !!document.querySelector('.screen.active'); };
+  var once = function (key) {
+    try { if (sessionStorage.getItem(key)) return false; sessionStorage.setItem(key, '1'); } catch (e) {}
+    return true;
+  };
+
+  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    var hadWorker = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(function () {});
+    // A new version has just taken over: show it now, unless the wearer is mid-task.
+    navigator.serviceWorker.addEventListener('controllerchange', function () {
+      if (hadWorker && !window.waylineBusy && once('wayline-updated')) location.reload();
+    });
+  }
+
+  setTimeout(function () {
+    if (started()) return;
+    if (!once('wayline-repair')) {
+      box.textContent = 'Wayline could not start. ' + (problem || 'Check the connection.') + ' Middle tap, Restart.';
+      return;
+    }
+    box.textContent = 'Repairing Wayline…';
+    var again = function () { location.reload(); };
+    var jobs = [];
+    try {
+      if (window.caches) jobs.push(caches.keys().then(function (keys) { return Promise.all(keys.map(function (k) { return caches.delete(k); })); }));
+      if (navigator.serviceWorker) jobs.push(navigator.serviceWorker.getRegistrations().then(function (regs) { return Promise.all(regs.map(function (r) { return r.unregister(); })); }));
+    } catch (e) {}
+    Promise.all(jobs).then(again, again);
+  }, 15000);
+})();
+</script>
 <div id="stage">
   <canvas id="map" aria-hidden="true"></canvas>
 
