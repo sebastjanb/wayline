@@ -3,7 +3,7 @@ import { RouteGuide } from './guide.js';
 import { searchPlaces, fetchRoute, MODES } from './services.js';
 import { lonToX, latToY, xToLon, yToLat, distance, bearing, angleDiff, formatDistance, formatDuration, EARTH_CIRCUMFERENCE } from './geo.js';
 
-const APP_VERSION = '2.4';
+const APP_VERSION = '2.5';
 
 // The app is static and can live on any host. The phone relay is a server
 // function, so it and the phone page stay on Netlify.
@@ -133,7 +133,7 @@ function renderStatus() {
 const input = { keys: 0, last: '-' };
 function renderDebug() {
   const { loaded, failed } = map.store.stats;
-  const where = state.fix ? `ok ±${Math.round(state.fix.accuracy)}m` : loc.error ? loc.error.slice(0, 6) : locPending ? 'asking' : 'idle';
+  const where = (state.fix ? `ok ±${Math.round(state.fix.accuracy)}m` : loc.error ? loc.error.slice(0, 6) : locPending ? 'asking' : 'idle') + (preciseLocation ? ' gps' : ' net');
   const focus = document.activeElement && (document.activeElement.id || document.activeElement.textContent.trim().slice(0, 10)) || 'none';
   $('debug').textContent = `v${APP_VERSION} · loc ${where} ×${loc.errors || 0} · perm ${permission} · map ${loaded}/${failed} · key ${input.keys} ${input.last} · at ${focus}${navigator.onLine ? '' : ' · offline'}`;
 }
@@ -222,7 +222,7 @@ function moveFocus(dx, dy) {
   const items = focusables();
   if (!items.length) return;
   const from = document.activeElement;
-  if (!items.includes(from)) { items[0].focus(); return; }
+  if (!items.includes(from)) { (items.includes(lastFocused) ? lastFocused : items[0]).focus(); return; }
   const a = from.getBoundingClientRect();
   const ax = a.left + a.width / 2, ay = a.top + a.height / 2;
   let best = null, bestScore = Infinity;
@@ -241,6 +241,26 @@ function moveFocus(dx, dy) {
     best.scrollIntoView({ block: 'nearest' });
   }
 }
+
+// On the glasses a select pinch can arrive as a pointer press somewhere on the
+// page before the Enter key. A press on empty space would take the focus off
+// the control the wearer chose, and Enter would then land on nothing. So a
+// press outside a control is not allowed to move the focus, and the app also
+// remembers the last focused control in case the focus is lost anyway.
+let lastFocused = null, lastFocusedAt = 0;
+document.addEventListener('focusin', (e) => {
+  if (e.target.matches && e.target.matches('button, input')) { lastFocused = e.target; lastFocusedAt = Date.now(); }
+});
+for (const type of ['pointerdown', 'mousedown', 'touchstart']) {
+  document.addEventListener(type, (e) => {
+    if (!(e.target.closest && e.target.closest('button, input'))) e.preventDefault();
+  }, { capture: true, passive: false });
+}
+const chosen = () => {
+  const active = document.activeElement;
+  if (active && active.matches('button, input')) return active;
+  return lastFocused && lastFocused.isConnected && lastFocused.offsetParent && $(state.screen).contains(lastFocused) ? lastFocused : null;
+};
 
 // Select can reach the page as an Enter key, as a click, or as both. Enter is
 // turned into a click here, and a second click on the same control within a
@@ -262,10 +282,15 @@ document.addEventListener('keydown', (e) => {
   input.keys++;
   input.last = e.key.replace('Arrow', '');
   setTimeout(renderDebug, 0);
-  if (e.key === 'Enter' && document.activeElement && document.activeElement.tagName === 'BUTTON') {
-    e.preventDefault();
-    document.activeElement.click();
-    return;
+  if (e.key === 'Enter') {
+    const target = chosen();
+    if (target && target.tagName === 'BUTTON') {
+      e.preventDefault();
+      if (document.activeElement !== target) target.focus();
+      target.click();
+      return;
+    }
+    if (target && document.activeElement !== target) target.focus();   // a text field: give it back the focus
   }
   const arrows = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
   if (arrows[e.key] && state.look) {
@@ -301,7 +326,14 @@ function onFix(lat, lon, accuracy, course = null) {
   renderStatus();
 }
 
-let watchStartedAt = 0, preciseLocation = true, locBusy = false, locTimer = 0;
+// Coarse first: the phone answers it from the network within seconds, indoors
+// too. Precise follows once there is a position to show.
+let watchStartedAt = 0, preciseLocation = false, locBusy = false, locTimer = 0, preciseFailedAt = 0;
+// After a failure, try the other kind; a failed precise request is not retried for a minute.
+function otherKind() {
+  if (preciseLocation) preciseFailedAt = Date.now();
+  preciseLocation = !preciseLocation && Date.now() - preciseFailedAt > 60000;
+}
 let permission = 'unknown';   // 'granted' | 'prompt' | 'denied' | 'unknown'
 
 // Position comes from one-shot requests in a loop, never more than one at a
@@ -333,8 +365,9 @@ function startLocation() {
     if (!settle(3000)) return;
     loc.errors = (loc.errors || 0) + 1;
     loc.error = 'code 3: no answer';
+    otherKind();
     renderStatus();
-  }, 20000);
+  }, 14000);
 
   navigator.geolocation.getCurrentPosition(
     (p) => {
@@ -343,6 +376,7 @@ function startLocation() {
       loc.error = '';
       loc.lastAt = Date.now();
       if (!settings.locOk) { settings.locOk = true; saveSettings(); }
+      preciseLocation = Date.now() - preciseFailedAt > 60000;
       onFix(p.coords.latitude, p.coords.longitude, p.coords.accuracy);
     },
     (err) => {
@@ -352,10 +386,12 @@ function startLocation() {
       if (err.code === 1 && settings.locOk) { settings.locOk = false; saveSettings(); }
       // No position this way: try the other way next (precise needs GPS, coarse
       // is answered from the network).
-      if (err.code !== 1) preciseLocation = !preciseLocation;
+      if (err.code !== 1) otherKind();
       renderStatus();
     },
-    { enableHighAccuracy: preciseLocation, timeout: 12000, maximumAge: 3000 },
+    preciseLocation
+      ? { enableHighAccuracy: true, timeout: 12000, maximumAge: 3000 }
+      : { enableHighAccuracy: false, timeout: 12000, maximumAge: 300000 },
   );
   renderStatus();
 }
@@ -550,21 +586,6 @@ map.onLandmarks = (shown) => {
     pinButtons.delete(key);
   }
 };
-
-// Pinch-and-drag pans the home map. Recenter puts it back on the wearer.
-let drag = null;
-$('map').addEventListener('pointerdown', (e) => {
-  if (state.screen !== 'home') return;
-  drag = { x: e.clientX, y: e.clientY };
-  $('map').setPointerCapture(e.pointerId);
-});
-$('map').addEventListener('pointermove', (e) => {
-  if (!drag) return;
-  state.follow = false;
-  map.panBy(e.clientX - drag.x, e.clientY - drag.y);
-  drag = { x: e.clientX, y: e.clientY };
-});
-for (const type of ['pointerup', 'pointercancel']) $('map').addEventListener(type, () => { drag = null; });
 
 // ------------------------------------------------------------------ search
 
