@@ -3,7 +3,7 @@ import { RouteGuide } from './guide.js';
 import { searchPlaces, fetchRoute, MODES } from './services.js';
 import { lonToX, latToY, xToLon, yToLat, distance, bearing, angleDiff, formatDistance, formatDuration, EARTH_CIRCUMFERENCE } from './geo.js';
 
-const APP_VERSION = '2.9';
+const APP_VERSION = '2.10';
 
 // The app is static and can live on any host. The phone relay is a server
 // function, so it and the phone page stay on Netlify.
@@ -565,7 +565,7 @@ function refresh() {
     : settings.last ? { ...world(settings.last), accuracy: 0, heading: null, stale: true } : null;
 
   if (screen === 'home') {
-    map.setLayout({ x: 300, y: 280 }, { x: 300, y: 280, r: 280 });
+    map.setLayout({ x: 300, y: 300 - EDGE / 2 }, { x: 300, y: 300 - EDGE / 2, r: 288 - EDGE / 2 });
     if (!fix && settings.last && state.follow) map.setCamera({ ...world(settings.last), zoom: state.homeZoom, pitch: 0, bearing: 0 });
   } else if (screen === 'place' && place) {
     const cy = 232 - EDGE / 2;
@@ -1170,6 +1170,7 @@ function renderDiagnostics() {
     `Tile error: ${tileError || 'none'}`,
     `Script error: ${lastError || 'none'}`,
     `Online: ${navigator.onLine}`,
+    $('debug').textContent,
   ];
   $('diag-lines').textContent = lines.join('\n');
 }

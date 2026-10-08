@@ -78,16 +78,17 @@ h1 { margin: 0; padding: 22px 30px 12px; font-size: 24px; font-weight: 700; colo
 .top-row { position: absolute; top: 16px; left: 20px; right: 20px; display: flex; gap: 12px; }
 .where { flex: 1; min-width: 0; font-size: 24px; font-weight: 500; text-align: left; color: var(--dim); }
 .side-left, .side-right-a, .side-right-b { position: absolute; }
-.side-left { left: 16px; top: 246px; }
-.side-right-a { right: 16px; top: 206px; }
-.side-right-b { right: 16px; top: 286px; }
-.chips { position: absolute; left: 12px; right: 12px; bottom: 58px; display: flex; gap: 8px; }
+.side-left { left: 16px; top: 266px; }
+.side-right-a { right: 16px; top: 226px; }
+.side-right-b { right: 16px; top: 306px; }
+.chips { position: absolute; left: 12px; right: 12px; bottom: var(--edge); display: flex; gap: 8px; }
 .chips button { flex: 1 1 auto; padding: 0 10px; font-size: 19px; }
-.status { position: absolute; left: 50%; top: 270px; transform: translate(-50%, -50%); width: max-content; max-width: 440px; padding: 14px 24px; border-radius: 26px; background: var(--surface); font-size: 22px; font-weight: 600; text-align: center; }
+.status { position: absolute; left: 50%; top: 290px; transform: translate(-50%, -50%); width: max-content; max-width: 440px; padding: 14px 24px; border-radius: 26px; background: var(--surface); font-size: 22px; font-weight: 600; text-align: center; }
 .status:empty { display: none; }
-.enable { position: absolute; left: 170px; width: 260px; top: 330px; }
+.enable { position: absolute; left: 170px; width: 260px; top: 350px; }
 .enable[hidden] { display: none; }
-.debug { position: absolute; left: 12px; right: 12px; bottom: 14px; font-size: 15px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Kept out of sight; its text is shown on the Diagnostics screen. */
+.debug { display: none; }
 
 /* Own keyboard: letters and numbers on separate pages so every key fits */
 #query { position: absolute; top: 12px; left: 12px; right: 12px; width: 576px; height: 60px; font-size: 24px; border-radius: 20px; -webkit-user-select: text; user-select: text; }
