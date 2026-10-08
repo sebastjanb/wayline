@@ -21,6 +21,54 @@ const ROAD_RANK = {
 const ROAD_WIDTH = [1.6, 3.2, 5, 7];
 const ROAD_COLOR = ['rgba(160,174,214,.42)', '#8794ba', '#a7b3d6', '#c6cfec'];
 
+// Places worth a pin on the map: colour and symbol by kind.
+const POI_STYLES = [
+  { glyph: 'bed', color: '#a56bff', kinds: ['lodging', 'hotel', 'hostel', 'motel', 'guest_house'] },
+  { glyph: 'star', color: '#e0a52e', kinds: ['attraction', 'museum', 'monument', 'castle', 'viewpoint', 'gallery', 'art_gallery', 'zoo', 'theme_park', 'aquarium', 'stadium', 'theatre'] },
+  { glyph: 'food', color: '#f0803c', kinds: ['restaurant', 'fast_food', 'food_court'] },
+  { glyph: 'cup', color: '#f0803c', kinds: ['cafe', 'bar', 'beer', 'pub'] },
+  { glyph: 'tree', color: '#3fb56f', kinds: ['park', 'garden'] },
+];
+const poiStyle = (cls, sub) => POI_STYLES.find((s) => s.kinds.includes(cls) || s.kinds.includes(sub)) || null;
+
+// White symbol inside a pin, centred on (x, y), about 14 px across.
+function drawGlyph(ctx, glyph, x, y) {
+  ctx.fillStyle = '#ffffff';
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  if (glyph === 'star') {
+    for (let i = 0; i < 10; i++) {
+      const r = i % 2 ? 3.3 : 7.6, a = -Math.PI / 2 + i * Math.PI / 5;
+      ctx.lineTo(x + Math.cos(a) * r, y + Math.sin(a) * r);
+    }
+    ctx.fill();
+  } else if (glyph === 'bed') {
+    ctx.rect(x - 7.5, y - 5.5, 2.4, 11);
+    ctx.rect(x - 7.5, y + 0.5, 15, 3.4);
+    ctx.rect(x + 5.1, y + 0.5, 2.4, 5);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x - 2.4, y - 1.8, 2.1, 0, 7);
+    ctx.fill();
+  } else if (glyph === 'food') {
+    ctx.moveTo(x - 3.5, y - 7); ctx.lineTo(x - 3.5, y + 7);
+    ctx.moveTo(x - 6, y - 7); ctx.lineTo(x - 6, y - 2.5); ctx.lineTo(x - 1, y - 2.5); ctx.lineTo(x - 1, y - 7);
+    ctx.moveTo(x + 4.5, y + 7); ctx.lineTo(x + 4.5, y - 7); ctx.quadraticCurveTo(x + 8, y - 3, x + 4.5, y + 0.5);
+    ctx.stroke();
+  } else if (glyph === 'cup') {
+    ctx.rect(x - 6, y - 4.5, 9.5, 9.5);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x + 4.5, y - 0.5, 3, -Math.PI / 2, Math.PI / 2);
+    ctx.stroke();
+  } else {
+    ctx.arc(x, y - 2.2, 5.6, 0, 7);
+    ctx.rect(x - 1.2, y + 2, 2.4, 5.5);
+    ctx.fill();
+  }
+}
+
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 function shape(pts) {
@@ -69,7 +117,8 @@ function buildTile(z, x, y, layers) {
   for (const f of layers.poi || []) {
     const name = f.props['name:en'] || f.props.name_en || f.props['name:latin'] || f.props.name;
     if (f.type !== 1 || !name || !f.parts.length) continue;
-    tile.pois.push({ name, cls: f.props.class || '', sub: f.props.subclass || '', rank: f.props.rank || 99, x: f.parts[0][0], y: f.parts[0][1] });
+    const cls = f.props.class || '', kind = f.props.subclass || '';
+    tile.pois.push({ name, cls, sub: kind, rank: f.props.rank || 99, style: poiStyle(cls, kind), x: f.parts[0][0], y: f.parts[0][1] });
   }
   return tile;
 }
@@ -183,6 +232,7 @@ export class MapView {
     this.pins = [];         // [{ x, y, label, active }]
     this.routeStyle = 'preview';   // 'preview' (blue dots) or 'guide' (white dots)
     this.labels = false;    // draw street names
+    this.landmarks = true;  // draw pins for notable places
     this.raf = 0;
     this.resize();
   }
@@ -463,6 +513,8 @@ export class MapView {
       ctx.stroke();
     }
 
+    const placed = [];   // screen spots already taken by a label or a pin
+
     // Street names lie along their streets, in capitals on a dark plate. Nearest
     // first; a name that would overlap one already placed is skipped.
     if (this.labels && cam.zoom >= 14.5) {
@@ -485,7 +537,7 @@ export class MapView {
       if ('letterSpacing' in ctx) ctx.letterSpacing = '1px';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      const placed = [], names = new Set();
+      const names = new Set();
       for (const l of wanted) {
         if (placed.length >= 6) break;
         if (names.has(l.name)) continue;
@@ -503,6 +555,51 @@ export class MapView {
         ctx.restore();
       }
       if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
+    }
+
+    // Landmarks: a coloured pin with a symbol and the name beside it. The most
+    // notable few in view, never on top of a street name or each other.
+    if (this.landmarks && cam.zoom >= 15) {
+      const found = [];
+      for (const tile of tiles) for (const poi of tile.pois) {
+        if (!poi.style || poi.x < x0 || poi.x > x1 || poi.y < y0 || poi.y > y1) continue;
+        if (this.dest && Math.abs(poi.x - this.dest.x) * S < 18 && Math.abs(poi.y - this.dest.y) * S < 18) continue;
+        const q = toScreen(poi.x, poi.y);
+        if (!q || Math.hypot(q[0] - mask.x, q[1] - mask.y) > mask.r * 0.8 || q[1] < 150 || q[1] > 470 || q[0] < 40 || q[0] > 430) continue;
+        if (Math.hypot(q[0] - ax, q[1] - ay) < 60) continue;
+        // Sights, hotels and parks come before places to eat, which are everywhere.
+        const everyday = poi.style.glyph === 'food' || poi.style.glyph === 'cup' ? 400 : 0;
+        found.push({ poi, q, order: everyday + poi.rank * 40 + Math.hypot(q[0] - ax, q[1] - ay) });
+      }
+      found.sort((a, b) => a.order - b.order);
+      let shown = 0;
+      for (const { poi, q } of found) {
+        if (shown >= 4) break;
+        const name = poi.name.length > 20 ? poi.name.slice(0, 19).trimEnd() + '…' : poi.name;
+        ctx.font = '600 15px system-ui, sans-serif';
+        const half = 16 + ctx.measureText(name).width / 2 + 10;
+        const centre = [q[0] + half - 16, q[1] - 20];
+        if (placed.some((p) => Math.hypot(p.q[0] - centre[0], p.q[1] - centre[1]) < p.half + half)) continue;
+        placed.push({ q: centre, half });
+        shown++;
+        // Pin: a disc with a point underneath, tip on the place itself.
+        ctx.beginPath();
+        ctx.moveTo(q[0], q[1]);
+        ctx.lineTo(q[0] - 8, q[1] - 11);
+        ctx.arc(q[0], q[1] - 21, 13.5, Math.PI * 0.8, Math.PI * 0.2);
+        ctx.closePath();
+        ctx.fillStyle = poi.style.color;
+        ctx.fill();
+        drawGlyph(ctx, poi.style.glyph, q[0], q[1] - 21);
+        ctx.font = '600 15px system-ui, sans-serif';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = 'rgba(6,12,32,.9)';
+        ctx.strokeText(name, q[0] + 19, q[1] - 20);
+        ctx.fillStyle = '#f2f5fc';
+        ctx.fillText(name, q[0] + 19, q[1] - 20);
+      }
     }
 
     for (const pin of this.pins) {
