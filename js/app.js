@@ -3,7 +3,7 @@ import { RouteGuide } from './guide.js';
 import { searchPlaces, fetchRoute, MODES } from './services.js';
 import { lonToX, latToY, xToLon, yToLat, distance, bearing, angleDiff, formatDistance, formatDuration, EARTH_CIRCUMFERENCE } from './geo.js';
 
-const APP_VERSION = '2.3';
+const APP_VERSION = '2.4';
 
 // The app is static and can live on any host. The phone relay is a server
 // function, so it and the phone page stay on Netlify.
@@ -159,6 +159,8 @@ function activate(screen) {
   if (screen !== 'nav') state.look = false;
   state.screen = screen;
   for (const el of document.querySelectorAll('.screen')) el.classList.toggle('active', el.id === screen);
+  $('boot').hidden = true;
+  window.waylineBusy = screen !== 'home';   // an update may reload the page only from the home map
   toast('');
   if (screen === 'home') { $('query').value = ''; $('suggest').textContent = ''; state.follow = true; }
   if (screen === 'phone') waitForPhone();
@@ -1177,7 +1179,3 @@ window.addEventListener('offline', renderStatus);
 // Where no permission prompt exists the compass can start straight away.
 if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission !== 'function') startCompass();
 registerAgentTools();
-
-if ('serviceWorker' in navigator && location.protocol === 'https:') {
-  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => {});
-}
