@@ -2,7 +2,7 @@
 // on the next launch; the cached copy opens the app without a connection.
 // Map tiles are kept too, so streets already seen still draw offline.
 
-const SHELL = 'wayline-shell-v16';
+const SHELL = 'wayline-shell-v17';
 const TILES = 'wayline-tiles-v1';
 const MAX_TILES = 400;
 const FILES = [
