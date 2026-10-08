@@ -145,7 +145,13 @@ h1 { margin: 0; padding: 22px 30px 12px; font-size: 24px; font-weight: 700; colo
 
 .look { position: absolute; left: 150px; width: 300px; bottom: calc(var(--edge) + 88px); height: 58px; padding: 0; background: transparent; border-radius: 20px; font-size: 20px; font-weight: 500; line-height: 1.1; text-shadow: 0 0 6px #000, 0 0 6px #000; }
 .look svg { display: block; margin: 0 auto 2px; width: 26px; height: 14px; }
-.look:focus { background: rgba(39, 49, 79, .9); }
+.look span { display: block; }
+.look-exit { font-size: 18px; color: var(--dim); }
+.look-exit[hidden] { display: none; }
+.look:focus { background: transparent; box-shadow: none; }
+/* Looking around: the hint becomes a plate at the bottom, the buttons step aside. */
+.look.looking { bottom: var(--edge); height: 84px; left: 110px; width: 380px; background: var(--surface); box-shadow: 0 0 0 3px #fff; text-shadow: none; }
+.dock[hidden] { display: none; }
 
 .dock { position: absolute; left: 0; right: 0; bottom: var(--edge); display: flex; justify-content: center; align-items: center; gap: 14px; }
 .dock button { height: 76px; min-width: 76px; padding: 0 23px; border-radius: 38px; display: inline-flex; align-items: center; justify-content: center; gap: 12px; font-size: 24px; }
