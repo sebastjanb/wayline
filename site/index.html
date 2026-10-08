@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=600, height=600, initial-scale=1.0, user-scalable=no">
+<meta name="description" content="Turn-by-turn navigation with a live map for display glasses.">
+<meta name="mrbd-web-app-capable" content="yes">
+<meta name="theme-color" content="#000000">
+<meta name="application-name" content="Wayline">
+<meta name="apple-mobile-web-app-title" content="Wayline">
+<title>Wayline</title>
+<link rel="icon" type="image/png" href="data:image/png;base64,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">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div id="stage">
+  <canvas id="map" aria-hidden="true"></canvas>
+
+  <section class="screen" id="home">
+    <div class="top-row">
+      <button id="open-type" class="where">Where to?</button>
+      <button id="open-phone" class="round" aria-label="Enter address on phone">
+        <svg viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2.4"/><path d="M11 18.2h2"/></svg>
+      </button>
+      <button id="open-settings" class="round" aria-label="Settings">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8v2.6M12 18.6v2.6M2.8 12h2.6M18.6 12h2.6M5.5 5.5l1.8 1.8M16.7 16.7l1.8 1.8M5.5 18.5l1.8-1.8M16.7 7.3l1.8-1.8"/></svg>
+      </button>
+    </div>
+    <button id="recenter" class="round side-left" aria-label="Centre on me">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="1.6" class="solid"/><path d="M12 2.5v3.5M12 18v3.5M2.5 12H6M18 12h3.5"/></svg>
+    </button>
+    <button id="zoom-in" class="round side-right-a" aria-label="Zoom in">
+      <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+    <button id="zoom-out" class="round side-right-b" aria-label="Zoom out">
+      <svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg>
+    </button>
+    <div id="status" class="status" role="status"></div>
+    <button id="enable-location" class="primary enable" hidden>Turn on location</button>
+    <div id="debug" class="debug"></div>
+    <div class="chips">
+      <button data-category="cafes">Cafes</button>
+      <button data-category="restaurants">Restaurants</button>
+      <button data-category="parks">Parks</button>
+      <button data-category="attractions">Attractions</button>
+    </div>
+  </section>
+
+  <section class="screen" id="type">
+    <input id="query" type="search" placeholder="Type an address or place" autocomplete="off" aria-label="Address or place">
+    <div id="suggest"></div>
+    <div id="keys"></div>
+  </section>
+
+  <section class="screen centered" id="phone">
+    <div class="line-2">On your phone, open</div>
+    <div id="phone-url" class="big-url"></div>
+    <div class="line-2">and enter this code</div>
+    <div id="phone-code" class="code"></div>
+    <div id="phone-status" class="line-2"></div>
+    <button id="phone-action">Cancel</button>
+  </section>
+
+  <section class="screen" id="results">
+    <h1 id="results-title"></h1>
+    <div id="results-list" class="list"></div>
+  </section>
+
+  <section class="screen" id="place">
+    <div class="pill place-title">
+      <div id="place-name" class="line-1"></div>
+      <div id="place-detail" class="line-2"></div>
+    </div>
+    <div class="foot">
+      <div id="place-summary" class="summary"></div>
+      <div class="row">
+        <button id="start" class="primary">Start</button>
+        <button id="mode">Walk</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="screen" id="nav">
+    <div class="pill turn">
+      <div id="turn-icon"></div>
+      <div class="turn-text">
+        <div id="turn-distance" class="line-1"></div>
+        <div id="turn-street" class="line-2"></div>
+      </div>
+    </div>
+    <div class="foot">
+      <div class="row">
+        <div id="nav-eta" class="eta"></div>
+        <span class="gap"></span>
+        <button id="exit">
+          <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>Exit
+        </button>
+        <button id="compass" class="round" aria-label="Switch map orientation">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path class="solid" d="M12 5.5l3 6.5h-6z"/><path d="M9 12l3 6.5 3-6.5"/></svg>
+        </button>
+        <button id="mute" class="round" aria-label="Voice guidance">
+          <svg viewBox="0 0 24 24"><path class="solid" d="M4 9.5h3.5L12 6v12l-4.5-3.5H4z"/><path id="mute-waves" d="M15.5 9a4.5 4.5 0 010 6M18 6.5a8 8 0 010 11"/><path id="mute-cross" d="M15.5 9.5l5 5M20.5 9.5l-5 5"/></svg>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <section class="screen centered" id="arrived">
+    <svg class="badge" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.5"/><path d="M7.5 12.5l3 3 6-6.5"/></svg>
+    <div class="big">You've arrived</div>
+    <div id="arrived-name" class="line-2"></div>
+    <button id="done" class="primary">Done</button>
+  </section>
+
+  <section class="screen" id="settings">
+    <h1>Settings</h1>
+    <div class="list">
+      <button id="set-units"></button>
+      <button id="set-voice"></button>
+      <button id="set-orientation"></button>
+      <button id="set-compass"></button>
+      <button id="open-diag">Diagnostics</button>
+    </div>
+    <p class="credit">Map data © OpenStreetMap contributors. Tiles OpenFreeMap. Routing Valhalla. Search Photon.</p>
+  </section>
+
+  <section class="screen" id="diag">
+    <h1>Diagnostics</h1>
+    <pre id="diag-lines"></pre>
+    <button id="diag-refresh" class="primary">Refresh</button>
+  </section>
+
+  <div id="toast" role="status"></div>
+</div>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

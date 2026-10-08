@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "name": "Wayline",
+  "description": "Turn-by-turn navigation with a live map.",
+  "appearance": {
+    "theme_color": "#4D7DFF",
+    "icon": {
+      "src": "../icons/glasses-icon.png"
+    }
+  }
+}
