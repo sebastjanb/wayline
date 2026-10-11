@@ -1,9 +1,9 @@
 import { MapView } from './map.js';
 import { RouteGuide } from './guide.js';
-import { searchPlaces, fetchRoute, MODES } from './services.js';
+import { searchPlaces, fetchRoute, fetchTraffic, trafficAvailable, MODES } from './services.js';
 import { lonToX, latToY, xToLon, yToLat, distance, bearing, angleDiff, formatDistance, formatDuration, EARTH_CIRCUMFERENCE } from './geo.js';
 
-const APP_VERSION = '2.10';
+const APP_VERSION = '2.11';
 
 // The app is static and can live on any host. The phone relay is a server
 // function, so it and the phone page stay on Netlify.
@@ -86,6 +86,12 @@ const state = {
   offCount: 0,
   rerouteAt: 0,
   rerouting: false,
+  traffic: null,      // live traffic for state.route, see fetchTraffic
+  trafficAt: 0,       // when it was last asked for
+  trafficSaid: 0,     // delay in seconds that was last spoken
+  faster: null,       // { via, saves }: an offer on screen
+  fasterAskedAt: 0,
+  fasterQuietUntil: 0, // no new offer before this time
 };
 const lastFocus = {};
 
@@ -558,6 +564,7 @@ function refresh() {
   map.routeStyle = screen === 'nav' ? 'guide' : 'preview';
   map.pins = [];
   map.route = null;
+  map.jams = [];
   map.routeFrom = null;
   map.dest = null;
   map.labels = true;
@@ -573,6 +580,7 @@ function refresh() {
     map.dest = world(place);
     if (route) {
       map.route = route.world;
+      map.jams = jamLines(0);
       map.setCamera({ ...map.fit(route.world, 250 - EDGE), pitch: 0, bearing: 0 });
     } else {
       map.setCamera({ ...map.dest, zoom: 16, pitch: 0, bearing: 0 });
@@ -582,6 +590,7 @@ function refresh() {
     const up = settings.headingUp;
     map.setLayout({ x: 300, y: (up ? 400 : 320) - EDGE / 2 }, { x: 300, y: 300, r: 400, top: up ? 90 : null });
     map.route = route.world;
+    map.jams = jamLines(progress ? progress.along : 0);
     map.dest = world(place);
     if (progress) {
       map.routeFrom = { index: progress.index, x: progress.x, y: progress.y };
@@ -865,6 +874,7 @@ async function loadRoute() {
   const token = ++state.routeToken;
   const { place, fix } = state;
   state.route = null;
+  state.traffic = null;
   $('start').disabled = true;
   $('place-min').textContent = '–';
   $('place-unit').textContent = 'min';
@@ -886,6 +896,7 @@ async function loadRoute() {
       if (document.activeElement === document.body) $('start').focus();
       refresh();
     }
+    if (fix) previewTraffic(token);
     return true;
   } catch {
     if (token !== state.routeToken) return false;
@@ -922,6 +933,9 @@ function startGuidance() {
   state.said = {};
   state.offCount = 0;
   state.progress = null;
+  state.trafficSaid = 0;
+  state.fasterAskedAt = Date.now();
+  hideFaster();
   lastFocus.nav = 'compass';
   applyLook(false);
   saveSettings();
@@ -945,6 +959,8 @@ function stopGuidance() {
   clearInterval(demoTimer);
   state.guide = null;
   state.progress = null;
+  state.traffic = null;
+  hideFaster();
   applyLook(false);
   if ('speechSynthesis' in window) speechSynthesis.cancel();
   if (FIXED) onFix(FIXED.lat, FIXED.lon, 8);
@@ -981,6 +997,8 @@ function guide() {
   if (!p) return;
   state.progress = p;
   const mode = route.mode;
+  const live = liveTime(p);
+  if (live) p.secondsLeft = live.seconds;
 
   if (p.remaining < ARRIVE_WITHIN[mode]) {
     const last = route.maneuvers[route.maneuvers.length - 1];
@@ -1003,7 +1021,8 @@ function guide() {
   bind('turn-street', turnLabel(next));
   bind('turn-distance', formatDistance(p.toNext, settings.imperial));
   bind('nav-min', formatDuration(p.secondsLeft));
-  bind('nav-arrive', `Arriving at ${clock(new Date(Date.now() + p.secondsLeft * 1000))}`);
+  bind('nav-arrive', `Arriving at ${clock(new Date(Date.now() + p.secondsLeft * 1000))}${live && live.delay >= 90 ? ` · +${Math.round(live.delay / 60)} min` : ''}`);
+  if (Date.now() - state.trafficAt > TRAFFIC_EVERY) updateTraffic();
   if (state.screen === 'steps' && state.stepShown !== p.nextIndex) renderSteps();
 
   if (p.next && !isArrival(p.next)) {
@@ -1019,6 +1038,123 @@ function guide() {
   }
 }
 
+// ---------------------------------------------------------------- traffic
+
+// Driving only. TomTom measures the route Wayline already follows, so the
+// turns and the voice stay as they are; traffic changes the arrival time,
+// colours the slow stretches and may offer a faster way.
+// The desk demo runs the clock faster, so it asks more often.
+const TRAFFIC_EVERY = (DEMO ? 15 : 180) * 1000;
+const FASTER_EVERY = (DEMO ? 25 : 360) * 1000;
+const FASTER_SHOWN = 30 * 1000;
+let fasterTimer = 0;
+
+const usesTraffic = (route) => !!route && route.mode === 'auto' && trafficAvailable();
+
+// Remaining time and delay now, scaled from the last measurement by distance left.
+function liveTime(p) {
+  const t = state.traffic;
+  if (!t || !t.left || Date.now() - t.at > 3 * TRAFFIC_EVERY) return null;
+  const share = Math.min(1, p.remaining / t.left);
+  return { seconds: t.time * share, delay: t.delay * share };
+}
+
+// Slow stretches still ahead, as lines for the map.
+function jamLines(along) {
+  const t = state.traffic;
+  if (!t || !state.route) return [];
+  const guide = state.guide || new RouteGuide(state.route);
+  return t.jams.filter((j) => j.to > along + 30)
+    .map((j) => ({ pts: guide.slice(Math.max(j.from, along), j.to), level: j.level }));
+}
+
+// On the route card, before driving: the time with traffic and the delay in it.
+async function previewTraffic(token) {
+  if (!usesTraffic(state.route)) return;
+  try {
+    const t = await fetchTraffic(state.route, 0, false);
+    if (token !== state.routeToken || state.guide) return;
+    state.traffic = t;
+    state.trafficAt = Date.now();
+    showTravelTime(t.time);
+    $('place-eta').textContent = `ETA ${clock(new Date(Date.now() + t.time * 1000))}${t.delay >= 90 ? ` · +${Math.round(t.delay / 60)} min traffic` : ' · no delays'}`;
+    if (state.screen === 'place') refresh();
+  } catch { /* no traffic data: the plain travel time stays */ }
+}
+
+async function updateTraffic() {
+  const { route, progress } = state;
+  state.trafficAt = Date.now();
+  if (!usesTraffic(route) || !progress || state.rerouting) return;
+  const wantFaster = Date.now() - state.fasterAskedAt > FASTER_EVERY && progress.remaining > 3000;
+  if (wantFaster) state.fasterAskedAt = Date.now();
+  try {
+    const t = await fetchTraffic(route, progress.along, wantFaster);
+    if (state.route !== route || !state.guide) return;
+    state.traffic = t;
+    // Say it when a delay first matters, and again only when it has grown.
+    if (t.delay >= 180 && t.delay - state.trafficSaid >= 120) {
+      state.trafficSaid = t.delay;
+      speak(`Traffic ahead. ${Math.round(t.delay / 60)} minutes delay.`);
+    } else if (t.delay < 60) state.trafficSaid = 0;
+    const saves = t.best ? t.time - t.best.time : 0;
+    if (t.best && t.best.via.length && saves >= Math.max(180, t.time * 0.1) && Date.now() > state.fasterQuietUntil) offerFaster(t.best, saves);
+    refresh();
+  } catch { /* keep the last measurement; it expires by itself */ }
+}
+
+function offerFaster(best, saves) {
+  state.faster = { via: best.via, length: best.length, saves };
+  const minutes = Math.round(saves / 60);
+  $('faster-text').textContent = `Faster route · saves ${minutes} min`;
+  $('faster').hidden = false;
+  if (state.screen === 'nav') $('faster').focus();
+  speak(`Faster route available. Saves ${minutes} minutes. Select to take it.`);
+  // Taken or left alone, the same offer does not come back for a quarter of an hour.
+  state.fasterQuietUntil = Date.now() + (DEMO ? 60 : 900) * 1000;
+  clearTimeout(fasterTimer);
+  fasterTimer = setTimeout(hideFaster, FASTER_SHOWN);
+}
+
+function hideFaster() {
+  clearTimeout(fasterTimer);
+  state.faster = null;
+  const button = $('faster');
+  if (button.hidden) return;
+  const had = document.activeElement === button;
+  button.hidden = true;
+  if (had && state.screen === 'nav') $(lastFocus.nav || 'compass').focus();
+}
+
+$('faster').addEventListener('click', async () => {
+  const offer = state.faster;
+  hideFaster();
+  if (!offer || !state.guide || state.rerouting) return;
+  state.rerouting = true;
+  state.rerouteAt = Date.now();
+  toast('Switching route…', 0);
+  try {
+    const route = await fetchRoute(state.fix, state.place, 'auto', offer.via);
+    // The app's own router must follow the same way; a detour means it could not.
+    if (Math.abs(route.total - offer.length) > offer.length * 0.2) throw new Error('mismatch');
+    if (state.guide) {
+      state.route = route;
+      state.guide = new RouteGuide(route);
+      state.said = {};
+      state.offCount = 0;
+      state.traffic = null;
+      state.trafficAt = 0;
+      speak('Taking the faster route. ' + spoken(route.maneuvers[0]));
+      guide();
+      refresh();
+    }
+    toast('');
+  } catch {
+    toast('Could not switch route');
+  }
+  state.rerouting = false;
+});
+
 async function reroute() {
   state.rerouting = true;
   state.rerouteAt = Date.now();
@@ -1030,6 +1166,9 @@ async function reroute() {
       state.guide = new RouteGuide(route);
       state.said = {};
       state.offCount = 0;
+      state.traffic = null;
+      state.trafficAt = 0;
+      hideFaster();
       speak('Rerouting. ' + spoken(route.maneuvers[0]));
       guide();
       refresh();

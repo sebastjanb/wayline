@@ -1,0 +1,9 @@
+name = "wayline-traffic"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+workers_dev = true
+
+# The TomTom key is a secret, never a variable here:
+#   npx wrangler secret put TOMTOM_KEY --config traffic/wrangler.toml
+[vars]
+ALLOWED_ORIGINS = "https://sebastjanb.github.io,http://localhost:8802"

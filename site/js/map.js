@@ -231,6 +231,7 @@ export class MapView {
     this.dest = null;       // { x, y }
     this.pins = [];         // [{ x, y, label, active }]
     this.routeStyle = 'preview';   // 'preview' (blue dots) or 'guide' (white dots)
+    this.jams = [];         // [{ pts: Float64Array of world coordinates, level }]: slow stretches of the route
     this.labels = false;    // draw street names
     this.landmarks = true;  // draw pins for notable places
     this.keepLandmark = null;   // a pin the wearer has focused stays on the map
@@ -480,6 +481,22 @@ export class MapView {
       for (const tile of tiles) for (const s of tile.roads[rank]) if (seen(s)) line(s.pts);
       ctx.strokeStyle = ROAD_COLOR[rank];
       ctx.lineWidth = Math.max(1, ROAD_WIDTH[rank] * widthScale);
+      ctx.stroke();
+    }
+
+    // Slow traffic is a coloured band under the route dots: orange for slow, red for standing or closed.
+    for (const jam of this.jams) {
+      ctx.beginPath();
+      let pen = false;
+      for (let i = 0; i < jam.pts.length; i += 2) {
+        const q = toScreen(jam.pts[i], jam.pts[i + 1]);
+        if (!q) { pen = false; continue; }
+        if (pen) ctx.lineTo(q[0], q[1]); else ctx.moveTo(q[0], q[1]);
+        pen = true;
+      }
+      ctx.strokeStyle = jam.level >= 3 ? '#ff4d4d' : jam.level === 2 ? '#ff8a2e' : '#ffc23d';
+      ctx.lineWidth = this.routeStyle === 'guide' ? 20 : 14;
+      ctx.lineCap = ctx.lineJoin = 'round';
       ctx.stroke();
     }
 

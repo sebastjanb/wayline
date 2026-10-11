@@ -144,6 +144,10 @@ h1 { margin: 0; padding: 22px 30px 12px; font-size: 24px; font-weight: 700; colo
 .turn .line-1 { font-size: 28px; }
 .turn .line-2 { font-size: 22px; }
 
+/* Offer of a faster way: appears under the turn card and takes the focus while it is shown. */
+.faster { position: absolute; left: 60px; right: 60px; top: 136px; height: 64px; padding: 0 20px; border-radius: 32px; font-size: 24px; font-weight: 600; background: #1f6b3a; color: #fff; }
+.faster:focus { background: #2a9150; box-shadow: 0 0 0 3px #fff; }
+.faster[hidden] { display: none; }
 .look { position: absolute; left: 150px; width: 300px; bottom: calc(var(--edge) + 88px); height: 58px; padding: 0; background: transparent; border-radius: 20px; font-size: 20px; font-weight: 500; line-height: 1.1; text-shadow: 0 0 6px #000, 0 0 6px #000; }
 .look svg { display: block; margin: 0 auto 2px; width: 26px; height: 14px; }
 .look span { display: block; }

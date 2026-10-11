@@ -1,10 +1,13 @@
 // Place search (Photon) and routing (Valhalla). Both run on OpenStreetMap data,
-// answer cross-origin requests and need no API key.
+// answer cross-origin requests and need no API key. Live traffic comes from
+// TomTom through the Worker in traffic/, which holds the key.
 
 import { decodePolyline6, distance, lonToX, latToY } from './geo.js';
 
 const PHOTON = 'https://photon.komoot.io/api/';
 const VALHALLA = 'https://valhalla1.openstreetmap.de/route';
+const TRAFFIC = 'https://wayline-traffic.tokglass.workers.dev/traffic';
+const TRAFFIC_POINTS = 150;
 
 export const MODES = [
   { id: 'pedestrian', label: 'Walk' },
@@ -33,16 +36,22 @@ export async function searchPlaces(query, lat, lon) {
   });
 }
 
-export async function fetchRoute(from, to, mode) {
+// `via` are points the route must pass, in order, without stopping: used to
+// follow a way that the traffic service found faster.
+export async function fetchRoute(from, to, mode, via = []) {
   const request = {
-    locations: [{ lat: from.lat, lon: from.lon }, { lat: to.lat, lon: to.lon }],
+    locations: [
+      { lat: from.lat, lon: from.lon },
+      ...via.map(([lat, lon]) => ({ lat, lon, type: 'through', radius: 30 })),
+      { lat: to.lat, lon: to.lon },
+    ],
     costing: mode,
     units: 'kilometers',
     language: 'en-US',
   };
   const json = await getJson(`${VALHALLA}?json=${encodeURIComponent(JSON.stringify(request))}`);
   const leg = json.trip && json.trip.legs && json.trip.legs[0];
-  if (!leg) throw new Error('no route');
+  if (!leg || json.trip.legs.length !== 1) throw new Error('no route');
 
   const latlon = decodePolyline6(leg.shape);
   const count = latlon.length / 2;
@@ -64,4 +73,48 @@ export async function fetchRoute(from, to, mode) {
     exit: m.roundabout_exit_count || 0,
   }));
   return { latlon, world, cum, count, maneuvers, total: cum[count - 1], time: json.trip.summary.time, mode };
+}
+
+export const trafficAvailable = () => !!TRAFFIC;
+
+// Live traffic for the rest of a driving route, from `along` metres onward.
+// Jams come back as distances along the route, ready to draw and to announce.
+export async function fetchTraffic(route, along, wantFaster) {
+  const { latlon, cum, count, total } = route;
+  // An even sample of the remaining line is enough for TomTom to follow it.
+  const path = [];
+  const step = Math.max(1, (total - along) / (TRAFFIC_POINTS - 1));
+  let next = along;
+  for (let i = 0; i < count - 1 && path.length < TRAFFIC_POINTS - 1; i++) {
+    while (cum[i + 1] >= next && path.length < TRAFFIC_POINTS - 1) {
+      const span = cum[i + 1] - cum[i], t = span ? (next - cum[i]) / span : 0;
+      path.push([latlon[i * 2] + (latlon[i * 2 + 2] - latlon[i * 2]) * t, latlon[i * 2 + 1] + (latlon[i * 2 + 3] - latlon[i * 2 + 1]) * t]);
+      next += step;
+    }
+  }
+  const end = [latlon[count * 2 - 2], latlon[count * 2 - 1]];
+  path.push(end);
+  const response = await fetch(TRAFFIC, {
+    method: 'POST',
+    // A plain-text body keeps this a "simple" request: no CORS preflight.
+    body: JSON.stringify({ from: path[0], to: end, path, alt: !!wantFaster }),
+    signal: AbortSignal.timeout ? AbortSignal.timeout(15000) : undefined,
+  });
+  const json = await response.json();
+  if (!response.ok) throw new Error(json.error || 'HTTP ' + response.status);
+
+  // Nearest route point to a position, as metres along the route.
+  const alongOf = ([lat, lon]) => {
+    const kx = Math.cos(lat * Math.PI / 180);
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < count; i++) {
+      const dx = (latlon[i * 2 + 1] - lon) * kx, dy = latlon[i * 2] - lat, d = dx * dx + dy * dy;
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return cum[best];
+  };
+  const jams = (json.jams || [])
+    .map((j) => ({ from: alongOf(j.a), to: alongOf(j.b), kind: j.kind, level: j.level, delay: j.delay }))
+    .filter((j) => j.to - j.from > 20);
+  return { at: Date.now(), along, left: total - along, time: json.time, delay: json.delay, free: json.free, jams, best: json.best || null };
 }
