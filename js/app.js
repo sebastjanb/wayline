@@ -3,7 +3,7 @@ import { RouteGuide } from './guide.js';
 import { searchPlaces, fetchRoute, fetchTraffic, trafficAvailable, MODES } from './services.js';
 import { lonToX, latToY, xToLon, yToLat, distance, bearing, angleDiff, formatDistance, formatDuration, EARTH_CIRCUMFERENCE } from './geo.js';
 
-const APP_VERSION = '2.11';
+const APP_VERSION = '2.12';
 
 // The app is static and can live on any host. The phone relay is a server
 // function, so it and the phone page stay on Netlify.
@@ -302,7 +302,7 @@ document.addEventListener('click', (e) => {
 document.addEventListener('keydown', (e) => {
   input.keys++;
   input.last = e.key.replace('Arrow', '');
-  askOnGesture(e.key === 'Enter');
+  askOnGesture();
   setTimeout(renderDebug, 0);
   if (e.key === 'Enter') {
     const target = chosen();
@@ -353,36 +353,61 @@ let permission = 'unknown';   // 'granted' | 'prompt' | 'denied' | 'unknown'
 const burst = { n: 0, at: 0 };
 let statusAt = 0;
 
-function gotPosition(p) {
+// Where each position came from, for the Diagnostics screen.
+const source = { watch: 0, poll: 0, gesture: 0 };
+
+function gotPosition(p, from) {
   if (!loc.firstFixAfter && loc.firstAskAt) loc.firstFixAfter = Math.max(1, Math.round((Date.now() - loc.firstAskAt) / 1000));
+  source[from]++;
   loc.fixes++;
   loc.error = '';
   loc.lastAt = Date.now();
+  if (locPending) { locPending = false; catchUpHistory(); }
   if (!settings.locOk) { settings.locOk = true; saveSettings(); }
   onFix(p.coords.latitude, p.coords.longitude, p.coords.accuracy);
 }
 
-// Confirmed on the glasses: a request made at launch, with no gesture behind it,
-// is held back, while one sent from a select is answered at once. So until the
-// first position arrives, the first swipe and every select send a request of
-// their own (at most one every few seconds). The standing watch is left alone.
-let gestureAsks = 0, gestureAskAt = 0;
-function askOnGesture(isSelect) {
-  if (state.fix || FIXED || !navigator.geolocation) return;
+// Seen on the glasses: the watch started at launch has no gesture behind it and
+// is never answered, not even after a position has been found another way. So
+// positions are kept coming by three means at once:
+//   1. a watch, started again from inside a gesture whenever it is silent;
+//   2. a one-shot request from that same gesture;
+//   3. once a first position exists, a one-shot request every second or so
+//      for as long as nothing else delivers.
+// Whichever answers moves the marker; none of them waits for the others.
+const SILENT_MS = 4000;
+const silent = () => Date.now() - (loc.lastAt || 0) > SILENT_MS;
+let gestureAskAt = 0;
+
+function askOnGesture() {
+  if (FIXED || !navigator.geolocation || !silent()) return;
   const now = Date.now();
-  if (isSelect ? now - gestureAskAt < 4000 : gestureAsks > 0) return;
-  gestureAsks++;
+  if (now - gestureAskAt < 3000) return;
   gestureAskAt = now;
   loc.asked = (loc.asked || 0) + 1;
   navigator.geolocation.getCurrentPosition(
-    (p) => {
-      if (locPending) { locPending = false; catchUpHistory(); }
-      gotPosition(p);
-    },
+    (p) => gotPosition(p, 'gesture'),
     () => {},
-    { enableHighAccuracy: false, timeout: 60000, maximumAge: 600000 },
+    state.fix
+      ? { enableHighAccuracy: true, timeout: 20000, maximumAge: 2000 }
+      : { enableHighAccuracy: false, timeout: 60000, maximumAge: 600000 },
   );
+  startLocation();   // the watch too: this one has a gesture behind it
 }
+
+let pollBusy = false, pollAt = 0;
+setInterval(() => {
+  // About one position a second: enough to follow a car, and each request is small.
+  if (FIXED || !state.fix || !navigator.geolocation || Date.now() - (loc.lastAt || 0) < 1000) return;
+  if (pollBusy && Date.now() - pollAt < 12000) return;   // one at a time; a lost request is given up on
+  pollBusy = true;
+  pollAt = Date.now();
+  navigator.geolocation.getCurrentPosition(
+    (p) => { pollBusy = false; gotPosition(p, 'poll'); },
+    () => { pollBusy = false; },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 1000 },
+  );
+}, 400);
 
 // A standing watch, set up exactly as in the first version: on the glasses it
 // delivers a position within seconds, where one-shot requests can go unanswered
@@ -413,7 +438,7 @@ function startLocation() {
     (p) => {
       answered();
       clearTimeout(watchdog);
-      gotPosition(p);
+      gotPosition(p, 'watch');
     },
     (err) => {
       answered();
@@ -1301,6 +1326,7 @@ function renderDiagnostics() {
     `Screen ${innerWidth}×${innerHeight} @${devicePixelRatio}`,
     `Location: ${loc.fixes} fixes${state.fix ? `, ±${Math.round(state.fix.accuracy)} m, ${Math.round((Date.now() - loc.lastAt) / 1000)} s ago` : ''}`,
     `Location error: ${loc.error || 'none'}`,
+    `Positions from: watch ${source.watch}, poll ${source.poll}, gesture ${source.gesture}`,
     `Location permission: ${permission}, asked ${loc.asked || 0}×`,
     state.fix ? `Position: ${state.fix.lat.toFixed(4)}, ${state.fix.lon.toFixed(4)}` : 'Position: none',
     `Compass: ${compass.events} readings`,
