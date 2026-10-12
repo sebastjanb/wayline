@@ -3,7 +3,7 @@ import { RouteGuide } from './guide.js';
 import { searchPlaces, fetchRoute, fetchTraffic, trafficAvailable, MODES } from './services.js';
 import { lonToX, latToY, xToLon, yToLat, distance, bearing, angleDiff, formatDistance, formatDuration, EARTH_CIRCUMFERENCE } from './geo.js';
 
-const APP_VERSION = '2.12';
+const APP_VERSION = '2.13';
 
 // The app is static and can live on any host. The phone relay is a server
 // function, so it and the phone page stay on Netlify.
@@ -21,7 +21,7 @@ const FIXED = params.has('lat') && params.has('lon')
 const SETTINGS_KEY = 'glassnav.settings';
 const SETTINGS_VERSION = 1;
 const settings = Object.assign(
-  { v: SETTINGS_VERSION, imperial: false, voice: true, headingUp: true, flipCompass: false, mode: 'pedestrian', last: null, pairCode: '', locOk: false },
+  { v: SETTINGS_VERSION, imperial: false, voice: true, headingUp: true, flipCompass: false, compassRule: 0, compassOffset: 0, mode: 'pedestrian', last: null, pairCode: '', locOk: false },
   readSettings(),
 );
 
@@ -31,6 +31,10 @@ function readSettings() {
     return saved && saved.v === SETTINGS_VERSION ? saved : {};
   } catch { return {}; }
 }
+// Rule 2: alpha is taken as the compass heading itself (as the glasses report
+// it); "flipCompass" now means the mirrored W3C reading. Earlier guesses are dropped.
+if (settings.compassRule !== 2) { settings.compassRule = 2; settings.flipCompass = false; settings.compassOffset = 0; }
+
 function saveSettings() {
   try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch {}
 }
@@ -333,13 +337,28 @@ document.addEventListener('keydown', (e) => {
 let lastSavedAt = 0;
 
 function onFix(lat, lon, accuracy, course = null) {
-  const prev = state.fix;
-  if (course != null) state.course = course;
-  else if (prev && distance(prev.lat, prev.lon, lat, lon) > 6) {
-    state.course = bearing(prev.lat, prev.lon, lat, lon);
-    calibrateCompass(state.course);
+  const now = Date.now();
+  if (course != null) { state.course = course; state.courseAt = now; state.speed = 1.4; }
+  else {
+    // Direction and speed of travel are measured from an anchor a few metres
+    // back, so that jitter between two close positions does not swing them.
+    const from = state.courseFrom;
+    if (!from) state.courseFrom = { lat, lon, at: now };
+    else {
+      const moved = distance(from.lat, from.lon, lat, lon), seconds = Math.max(0.5, (now - from.at) / 1000);
+      if (moved > 8) {
+        state.course = bearing(from.lat, from.lon, lat, lon);
+        state.courseAt = now;
+        state.speed = moved / seconds;
+        state.courseFrom = { lat, lon, at: now };
+        learnCompass(state.course, state.speed);
+      } else if (seconds > 12) {
+        state.speed = 0;
+        state.courseFrom = { lat, lon, at: now };
+      }
+    }
   }
-  state.fix = { lat, lon, accuracy };
+  state.fix = { lat, lon, accuracy, at: now };
   settings.last = { lat, lon, at: Date.now() };
   if (Date.now() - lastSavedAt > 30000) { lastSavedAt = Date.now(); saveSettings(); }
   if (state.screen === 'place' && state.routeWaiting) loadRoute();
@@ -499,41 +518,59 @@ function keepTryingLocation() {
 }
 
 let lastAimAt = 0;
-let compassOn = false, sawAbsolute = false, rawAlpha = null;
-const calibration = { n: 0, standard: 0, raw: 0 };
+let compassOn = false, sawAbsolute = false, rawHeading = null;
+let headingOffset = settings.compassOffset || 0;
+const samples = [];   // { course, alpha } pairs taken while walking, to check the compass against
 
 function onOrientation(e) {
-  let heading = null;
-  if (typeof e.webkitCompassHeading === 'number') {
-    heading = e.webkitCompassHeading;
-    rawAlpha = null;
-  } else if (e.alpha != null) {
+  let raw = null;
+  if (typeof e.webkitCompassHeading === 'number') raw = e.webkitCompassHeading;
+  else if (e.alpha != null) {
     const absolute = e.type === 'deviceorientationabsolute' || e.absolute;
     if (absolute) sawAbsolute = true; else if (sawAbsolute) return;
-    rawAlpha = e.alpha;
-    heading = settings.flipCompass ? e.alpha : 360 - e.alpha;
+    compass.alpha = e.alpha;
+    raw = settings.flipCompass ? 360 - e.alpha : e.alpha;
   }
-  if (heading == null) return;
+  if (raw == null) return;
   compass.events++;
-  heading = (heading + 360) % 360;
+  rawHeading = raw;
+  const heading = (raw + headingOffset + 720) % 360;
   state.heading = state.heading == null ? heading : (state.heading + angleDiff(heading, state.heading) * 0.25 + 360) % 360;
   state.headingAt = Date.now();
   // Ten redraws a second is plenty for a turning map and leaves time for input.
   if (state.headingAt - lastAimAt > 100) { lastAimAt = state.headingAt; aimCamera(); }
 }
 
-// The W3C says alpha grows anticlockwise; some devices report a clockwise
-// compass heading instead. Walking in a straight line tells the two apart.
-function calibrateCompass(course) {
-  if (rawAlpha == null || Date.now() - state.headingAt > 2000) return;
-  calibration.standard += Math.abs(angleDiff(360 - rawAlpha, course));
-  calibration.raw += Math.abs(angleDiff(rawAlpha, course));
-  if (++calibration.n < 6) return;
-  const flip = calibration.raw + 25 * calibration.n < calibration.standard;
-  const keep = calibration.standard + 25 * calibration.n < calibration.raw;
-  if (flip && !settings.flipCompass) { settings.flipCompass = true; saveSettings(); }
-  if (keep && settings.flipCompass) { settings.flipCompass = false; saveSettings(); }
-  calibration.n = calibration.standard = calibration.raw = 0;
+// How tightly a set of angles agree: 1 is identical, 0 is scattered.
+function agreement(angles) {
+  let x = 0, y = 0;
+  for (const a of angles) { x += Math.cos(a * Math.PI / 180); y += Math.sin(a * Math.PI / 180); }
+  return Math.hypot(x, y) / angles.length;
+}
+
+// Walking gives the truth to check the compass against: over a stretch, the
+// wearer faces the way they walk. Two things are learned from it.
+//   Offset: a compass that is off by a fixed angle (or has no north at all and
+//     only reports turning) is shifted to match the direction of travel.
+//   Sense: if the readings only fit when mirrored, they are mirrored.
+// Not in a vehicle: a car body throws a compass off, and the map then follows
+// the direction of travel instead (see facing).
+function learnCompass(course, speed) {
+  if (rawHeading == null || compass.alpha == null || Date.now() - state.headingAt > 1500) return;
+  if (speed < 0.7 || speed > 3) return;
+  samples.push({ course, alpha: compass.alpha });
+  if (samples.length > 14) samples.shift();
+
+  if (samples.length >= 8 && agreement(samples.map((s) => s.course)) < 0.9) {
+    const direct = agreement(samples.map((s) => angleDiff(s.course, s.alpha)));
+    const mirrored = agreement(samples.map((s) => angleDiff(s.course, 360 - s.alpha)));
+    const wantFlip = mirrored - direct > 0.25 ? true : direct - mirrored > 0.25 ? false : settings.flipCompass;
+    if (wantFlip !== settings.flipCompass) { settings.flipCompass = wantFlip; headingOffset = 0; saveSettings(); return; }
+  }
+  const want = angleDiff(course, rawHeading);
+  headingOffset = (headingOffset + angleDiff(want, headingOffset) * 0.2 + 540) % 360 - 180;
+  // Only a compass with a real north keeps its offset between sessions.
+  if (sawAbsolute && Math.abs(angleDiff(headingOffset, settings.compassOffset || 0)) > 5) { settings.compassOffset = Math.round(headingOffset); saveSettings(); }
 }
 
 // Must be called from a select gesture: the permission prompt needs one.
@@ -553,11 +590,24 @@ async function startCompass() {
   window.addEventListener('deviceorientation', onOrientation);
 }
 
-// Compass when it is fresh, otherwise the direction of travel.
+// Which way is "ahead". At driving or cycling speed it is the direction of
+// travel: steadier than any compass, and right inside a car. On foot it is the
+// compass, so the map turns with the head; without one, the direction of travel.
 function facing() {
-  if (state.heading != null && Date.now() - state.headingAt < 3000) return state.heading;
+  const now = Date.now();
+  const moving = state.course != null && now - (state.courseAt || 0) < 8000;
+  if (moving && state.speed > 3) return state.course;
+  if (state.heading != null && now - state.headingAt < 3000) return state.heading;
   return state.course;
 }
+
+// While guiding, say so on the turn card when positions stop coming, instead
+// of showing a distance that is no longer true.
+setInterval(() => {
+  if (!state.guide || FIXED || !loc.lastAt) return;
+  const quiet = Math.round((Date.now() - loc.lastAt) / 1000);
+  if (quiet >= 8) bind('turn-distance', `No position for ${quiet} s`);
+}, 1000);
 
 // --------------------------------------------------------------- the map
 
@@ -1329,7 +1379,8 @@ function renderDiagnostics() {
     `Positions from: watch ${source.watch}, poll ${source.poll}, gesture ${source.gesture}`,
     `Location permission: ${permission}, asked ${loc.asked || 0}×`,
     state.fix ? `Position: ${state.fix.lat.toFixed(4)}, ${state.fix.lon.toFixed(4)}` : 'Position: none',
-    `Compass: ${compass.events} readings`,
+    `Compass: ${compass.events} readings, ${sawAbsolute ? 'true north' : 'relative'}, ${settings.flipCompass ? 'mirrored' : 'direct'}, offset ${Math.round(headingOffset)}°`,
+    `Speed ${(state.speed || 0).toFixed(1)} m/s, course ${state.course == null ? '-' : Math.round(state.course) + '°'}, facing ${facing() == null ? '-' : Math.round(facing()) + '°'}`,
     `Map tiles: ${loaded} loaded, ${failed} failed`,
     `Tile source: ${map.store.template ? 'ok' : 'not reached'}`,
     `Tile error: ${tileError || 'none'}`,
@@ -1344,7 +1395,7 @@ function renderSettings() {
   $('set-units').textContent = `Units: ${settings.imperial ? 'Miles' : 'Kilometres'}`;
   $('set-voice').textContent = `Voice guidance: ${settings.voice ? 'On' : 'Off'}`;
   $('set-orientation').textContent = `Map: ${settings.headingUp ? 'Follows where you face' : 'North up'}`;
-  $('set-compass').textContent = `Compass direction: ${settings.flipCompass ? 'Reversed' : 'Standard'}`;
+  $('set-compass').textContent = `Compass: ${settings.flipCompass ? 'Mirrored' : 'Direct'}`;
   renderMute();
 }
 const toggles = { 'set-units': 'imperial', 'set-voice': 'voice', 'set-orientation': 'headingUp', 'set-compass': 'flipCompass' };
