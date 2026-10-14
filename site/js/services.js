@@ -5,6 +5,7 @@
 import { decodePolyline6, distance, lonToX, latToY } from './geo.js';
 
 const PHOTON = 'https://photon.komoot.io/api/';
+const NOMINATIM = 'https://nominatim.openstreetmap.org/search';
 const VALHALLA = 'https://valhalla1.openstreetmap.de/route';
 const TRAFFIC = 'https://wayline-traffic.tokglass.workers.dev/traffic';
 const TRAFFIC_POINTS = 150;
@@ -15,17 +16,43 @@ export const MODES = [
   { id: 'auto', label: 'Drive' },
 ];
 
-async function getJson(url, signal) {
-  const timeout = AbortSignal.timeout ? AbortSignal.timeout(15000) : undefined;
+async function getJson(url, signal, ms = 15000) {
+  const timeout = AbortSignal.timeout ? AbortSignal.timeout(ms) : undefined;
   const response = await fetch(url, { signal: signal || timeout });
   if (!response.ok) throw new Error('HTTP ' + response.status);
   return response.json();
 }
 
-export async function searchPlaces(query, lat, lon) {
+// Photon first. When it is down, a search the wearer asked for (not the
+// suggestions while typing: Nominatim's rules forbid that use) goes to
+// Nominatim, biased to the area around the wearer.
+export async function searchPlaces(query, lat, lon, fallback = false) {
+  try {
+    return await searchPhoton(query, lat, lon);
+  } catch (error) {
+    if (!fallback) throw error;
+    return searchNominatim(query, lat, lon);
+  }
+}
+
+async function searchNominatim(query, lat, lon) {
+  const params = new URLSearchParams({ q: query, format: 'jsonv2', limit: '10', addressdetails: '1', 'accept-language': 'en' });
+  if (lat != null) params.set('viewbox', [lon - 0.4, lat + 0.25, lon + 0.4, lat - 0.25].map((n) => n.toFixed(4)).join(','));
+  const json = await getJson(`${NOMINATIM}?${params}`);
+  return json.map((r) => {
+    const a = r.address || {};
+    const pLat = Number(r.lat), pLon = Number(r.lon);
+    const street = [a.road, a.house_number].filter(Boolean).join(' ');
+    const name = r.name || street || r.display_name.split(',')[0];
+    const detail = [r.name ? street : '', a.city || a.town || a.village || a.county, a.country].filter(Boolean).join(', ');
+    return { name, detail, kind: r.type || '', lat: pLat, lon: pLon, meters: lat == null ? null : distance(lat, lon, pLat, pLon) };
+  });
+}
+
+async function searchPhoton(query, lat, lon) {
   const params = new URLSearchParams({ q: query, limit: '10', lang: 'en' });
   if (lat != null) { params.set('lat', lat.toFixed(5)); params.set('lon', lon.toFixed(5)); }
-  const json = await getJson(`${PHOTON}?${params}`);
+  const json = await getJson(`${PHOTON}?${params}`, null, 7000);
   return (json.features || []).map((f) => {
     const p = f.properties, [pLon, pLat] = f.geometry.coordinates;
     const street = [p.street, p.housenumber].filter(Boolean).join(' ');
@@ -38,7 +65,7 @@ export async function searchPlaces(query, lat, lon) {
 
 // `via` are points the route must pass, in order, without stopping: used to
 // follow a way that the traffic service found faster.
-export async function fetchRoute(from, to, mode, via = []) {
+export async function fetchRoute(from, to, mode, via = [], avoid = []) {
   const request = {
     locations: [
       { lat: from.lat, lon: from.lon },
@@ -46,6 +73,8 @@ export async function fetchRoute(from, to, mode, via = []) {
       { lat: to.lat, lon: to.lon },
     ],
     costing: mode,
+    // Roads to keep off: closures reported by traffic, or a road the driver just refused.
+    ...(avoid.length ? { exclude_locations: avoid.map(([lat, lon]) => ({ lat, lon })) } : {}),
     units: 'kilometers',
     language: 'en-US',
   };

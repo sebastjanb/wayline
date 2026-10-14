@@ -267,6 +267,14 @@ export class MapView {
     return { x: (b.minx + b.maxx) / 2, y: (b.miny + b.maxy) / 2, zoom: clamp(Math.log2(box / (span * 256)), 3, 17.5) };
   }
 
+  // Moves the centre at once while bearing, zoom and tilt keep easing: the
+  // guidance loop moves the marker many times a second and must not lag behind it.
+  placeCentre(x, y) {
+    this.target.x = this.cam.x = x;
+    this.target.y = this.cam.y = y;
+    this.requestRender();
+  }
+
   panBy(dx, dy) {
     const S = 256 * 2 ** this.cam.zoom;
     const b = this.cam.bearing * Math.PI / 180, cos = Math.cos(b), sin = Math.sin(b);
