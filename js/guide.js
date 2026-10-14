@@ -77,6 +77,14 @@ export class RouteGuide {
     return Float64Array.from(out);
   }
 
+  // Index of the route segment that holds `meters`.
+  indexAt(meters) {
+    const { cum, count } = this.route;
+    let i = 0;
+    while (i < count - 2 && cum[i + 1] < meters) i++;
+    return i;
+  }
+
   // Position `meters` along the route: the look-ahead target and the desk demo.
   pointAt(meters) {
     const { latlon, cum, count } = this.route;

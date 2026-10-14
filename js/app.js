@@ -3,7 +3,7 @@ import { RouteGuide } from './guide.js';
 import { searchPlaces, fetchRoute, fetchTraffic, trafficAvailable, MODES } from './services.js';
 import { lonToX, latToY, xToLon, yToLat, distance, bearing, angleDiff, formatDistance, formatDuration, EARTH_CIRCUMFERENCE } from './geo.js';
 
-const APP_VERSION = '2.13';
+const APP_VERSION = '2.14';
 
 // The app is static and can live on any host. The phone relay is a server
 // function, so it and the phone page stay on Netlify.
@@ -336,10 +336,16 @@ document.addEventListener('keydown', (e) => {
 
 let lastSavedAt = 0;
 
-function onFix(lat, lon, accuracy, course = null) {
+function onFix(lat, lon, accuracy, course = null, gpsSpeed = null, gpsHeading = null) {
   const now = Date.now();
-  if (course != null) { state.course = course; state.courseAt = now; state.speed = 1.4; }
-  else {
+  if (course != null) { state.course = course; state.courseAt = now; state.speed = DEMO ? 1.4 * DEMO : 1.4; }
+  else if (gpsSpeed != null && gpsSpeed > 2 && gpsHeading != null) {
+    // The phone measured speed and direction itself: steadier than two positions apart.
+    state.course = gpsHeading;
+    state.courseAt = now;
+    state.speed = gpsSpeed;
+    state.courseFrom = { lat, lon, at: now };
+  } else {
     // Direction and speed of travel are measured from an anchor a few metres
     // back, so that jitter between two close positions does not swing them.
     const from = state.courseFrom;
@@ -358,6 +364,8 @@ function onFix(lat, lon, accuracy, course = null) {
       }
     }
   }
+  if (gpsSpeed != null && gpsSpeed <= 2) state.speed = gpsSpeed;
+  if (state.speed > 3) state.fastAt = now;
   state.fix = { lat, lon, accuracy, at: now };
   settings.last = { lat, lon, at: Date.now() };
   if (Date.now() - lastSavedAt > 30000) { lastSavedAt = Date.now(); saveSettings(); }
@@ -383,7 +391,8 @@ function gotPosition(p, from) {
   loc.lastAt = Date.now();
   if (locPending) { locPending = false; catchUpHistory(); }
   if (!settings.locOk) { settings.locOk = true; saveSettings(); }
-  onFix(p.coords.latitude, p.coords.longitude, p.coords.accuracy);
+  const c = p.coords;
+  onFix(c.latitude, c.longitude, c.accuracy, null, Number.isFinite(c.speed) ? c.speed : null, Number.isFinite(c.heading) ? c.heading : null);
 }
 
 // Seen on the glasses: the watch started at launch has no gesture behind it and
@@ -590,16 +599,44 @@ async function startCompass() {
   window.addEventListener('deviceorientation', onOrientation);
 }
 
-// Which way is "ahead". At driving or cycling speed it is the direction of
-// travel: steadier than any compass, and right inside a car. On foot it is the
-// compass, so the map turns with the head; without one, the direction of travel.
+// Which way is "ahead". In a vehicle it is always the direction of travel,
+// also while stopped: the compass is unreliable inside a car and would swing
+// the map at a red light. On the route that direction is the road's own;
+// off it, the last one measured. On foot it is the compass, so the map turns
+// with the head; without one, the direction of travel.
+function inVehicle() {
+  const now = Date.now();
+  if (state.guide && state.route && state.route.mode !== 'pedestrian') return true;
+  return state.speed > 3 || now - (state.fastAt || 0) < 90000;
+}
 function facing() {
   const now = Date.now();
-  const moving = state.course != null && now - (state.courseAt || 0) < 8000;
-  if (moving && state.speed > 3) return state.course;
+  if (inVehicle()) {
+    const p = state.progress;
+    if (state.guide && p && p.off < 25) return state.shown ? state.shown.course : p.course;
+    if (state.course != null) return state.course;
+  }
   if (state.heading != null && now - state.headingAt < 3000) return state.heading;
   return state.course;
 }
+
+// Between positions the marker keeps moving along the route at the last
+// speed, for up to three seconds, so a car glides instead of jumping from fix
+// to fix. A new fix corrects it smoothly; a large difference snaps.
+const GLIDE_MS = 3000;
+setInterval(() => {
+  const { guide: g, progress: p, anchor } = state;
+  if (!g || !p || !anchor || state.look || state.screen !== 'nav' || p.off >= 25) { state.shown = null; return; }
+  const ahead = state.speed > 1 ? state.speed * Math.min(GLIDE_MS, Date.now() - anchor.at) / 1000 : 0;
+  const want = Math.min(state.route.total, anchor.along + ahead);
+  const was = state.shown ? state.shown.along : want;
+  const along = Math.abs(want - was) > 80 ? want : was + (want - was) * 0.35;
+  const at = g.pointAt(along);
+  state.shown = { along, x: lonToX(at.lon), y: latToY(at.lat), course: at.course };
+  if (map.puck) { map.puck.x = state.shown.x; map.puck.y = state.shown.y; }
+  map.routeFrom = { index: g.indexAt(along), x: state.shown.x, y: state.shown.y };
+  aimCamera();
+}, 66);
 
 // While guiding, say so on the turn card when positions stop coming, instead
 // of showing a distance that is no longer true.
@@ -625,6 +662,7 @@ function aimCamera() {
     if (head == null && progress) map.puck.heading = progress.course;
     if (state.look) { map.requestRender(); return; }   // looking around: the wearer moves the map
     const up = settings.headingUp;
+    if (state.shown) map.placeCentre(map.puck.x, map.puck.y);
     map.setCamera({
       x: map.puck.x, y: map.puck.y, zoom: up ? 17.6 : 17,
       pitch: up ? 55 : 0,
@@ -670,7 +708,10 @@ function refresh() {
     if (progress) {
       map.routeFrom = { index: progress.index, x: progress.x, y: progress.y };
       // Ride the route line while the fix agrees with it, so the puck does not jitter.
-      if (progress.off < 25) { map.puck.x = progress.x; map.puck.y = progress.y; }
+      if (progress.off < 25) {
+        map.puck.x = state.shown ? state.shown.x : progress.x;
+        map.puck.y = state.shown ? state.shown.y : progress.y;
+      }
     }
   }
   aimCamera();
@@ -747,7 +788,7 @@ async function runSearch(query, title = `“${query}”`) {
   const here = origin();
   toast('Searching…', 0);
   try {
-    const places = await searchPlaces(query, here && here.lat, here && here.lon);
+    const places = await searchPlaces(query, here && here.lat, here && here.lon, true);
     if (!places.length) { toast('No places found'); return []; }
     showResults(title, places);
     return places;
@@ -930,6 +971,7 @@ function renderModes() {
 
 function openPlace(place) {
   state.place = place;
+  state.avoid = [];
   state.route = null;
   $('place-name').textContent = place.name;
   renderModes();
@@ -947,6 +989,7 @@ function showTravelTime(seconds) {
 
 async function loadRoute() {
   const token = ++state.routeToken;
+  if (state.replannedFor && state.replannedFor !== token - 1) state.replannedFor = 0;
   const { place, fix } = state;
   state.route = null;
   state.traffic = null;
@@ -960,7 +1003,7 @@ async function loadRoute() {
   if (!from) { $('place-summary').textContent = 'Waiting for location…'; return false; }
   $('place-summary').textContent = 'Finding route…';
   try {
-    const route = await fetchRoute(from, place, settings.mode);
+    const route = await fetchRoute(from, place, settings.mode, [], state.avoid || []);
     if (token !== state.routeToken) return false;
     state.route = route;
     showTravelTime(route.time);
@@ -1071,6 +1114,8 @@ function guide() {
   const p = state.guide.update(fix.lat, fix.lon);
   if (!p) return;
   state.progress = p;
+  state.anchor = { along: p.along, at: Date.now() };
+  if (p.off < 25) state.lastOnAlong = p.along;
   const mode = route.mode;
   const live = liveTime(p);
   if (live) p.secondsLeft = live.seconds;
@@ -1089,7 +1134,15 @@ function guide() {
   // Off the route for several fixes in a row: plan again from here.
   const tolerance = Math.max(30, Math.min(60, fix.accuracy || 0));
   state.offCount = p.off > tolerance ? state.offCount + 1 : 0;
-  if (state.offCount >= 3 && !state.rerouting && Date.now() - state.rerouteAt > 8000) reroute();
+  if (state.offCount >= 3 && !state.rerouting && Date.now() - state.rerouteAt > 8000) {
+    // Leaving the route on purpose usually means that road is blocked. Keep the
+    // new route off the stretch just past where the driver left it.
+    if (state.lastOnAlong != null && route.mode !== 'pedestrian') {
+      const left = state.guide.pointAt(Math.min(route.total, state.lastOnAlong + 50));
+      avoidPoint([left.lat, left.lon]);
+    }
+    reroute();
+  }
 
   const next = p.next || p.current;
   bind('turn-icon', turnIcon(next.type), true);
@@ -1143,12 +1196,37 @@ function jamLines(along) {
     .map((j) => ({ pts: guide.slice(Math.max(j.from, along), j.to), level: j.level }));
 }
 
+// Points to keep the route off. Each closure or refused road adds one; the
+// list belongs to this destination and holds the latest few.
+function avoidPoint(point) {
+  state.avoid = (state.avoid || []).concat([point]).slice(-8);
+}
+
+// Road closures that traffic reports on the route ahead, as points to avoid.
+function closuresAhead(t, along) {
+  if (!t || !state.route) return [];
+  const g = state.guide || new RouteGuide(state.route);
+  return t.jams.filter((j) => j.kind === 'closed' && j.to > along).map((j) => {
+    const mid = g.pointAt((Math.max(j.from, along) + j.to) / 2);
+    return [mid.lat, mid.lon];
+  });
+}
+
 // On the route card, before driving: the time with traffic and the delay in it.
 async function previewTraffic(token) {
   if (!usesTraffic(state.route)) return;
   try {
     const t = await fetchTraffic(state.route, 0, false);
     if (token !== state.routeToken || state.guide) return;
+    const closed = closuresAhead(t, 0);
+    if (closed.length && !state.replannedFor) {
+      // A closed road on this route: plan again around it, once.
+      state.replannedFor = token;
+      closed.forEach(avoidPoint);
+      $('place-eta').textContent = 'Road closed on this route. Finding another…';
+      loadRoute();
+      return;
+    }
     state.traffic = t;
     state.trafficAt = Date.now();
     showTravelTime(t.time);
@@ -1166,6 +1244,12 @@ async function updateTraffic() {
   try {
     const t = await fetchTraffic(route, progress.along, wantFaster);
     if (state.route !== route || !state.guide) return;
+    const closed = closuresAhead(t, progress.along);
+    if (closed.length) {
+      closed.forEach(avoidPoint);
+      reroute('Road closed ahead. Rerouting.');
+      return;
+    }
     state.traffic = t;
     // Say it when a delay first matters, and again only when it has grown.
     if (t.delay >= 180 && t.delay - state.trafficSaid >= 120) {
@@ -1230,12 +1314,12 @@ $('faster').addEventListener('click', async () => {
   state.rerouting = false;
 });
 
-async function reroute() {
+async function reroute(saying = 'Rerouting.') {
   state.rerouting = true;
   state.rerouteAt = Date.now();
   toast('Rerouting…', 0);
   try {
-    const route = await fetchRoute(state.fix, state.place, state.route.mode);
+    const route = await fetchRoute(state.fix, state.place, state.route.mode, [], state.avoid || []);
     if (state.guide) {
       state.route = route;
       state.guide = new RouteGuide(route);
@@ -1244,7 +1328,7 @@ async function reroute() {
       state.traffic = null;
       state.trafficAt = 0;
       hideFaster();
-      speak('Rerouting. ' + spoken(route.maneuvers[0]));
+      speak(`${saying} ${spoken(route.maneuvers[0])}`);
       guide();
       refresh();
     }
@@ -1425,7 +1509,7 @@ function registerAgentTools() {
       const query = String(input && input.destination || '').trim().slice(0, 200);
       if (!query) return { error: 'missing_destination', next_action: 'Ask the user where they want to go.' };
       const here = origin();
-      const places = await searchPlaces(query, here && here.lat, here && here.lon);
+      const places = await searchPlaces(query, here && here.lat, here && here.lon, true);
       if (!places.length) return { error: 'not_found', next_action: 'Tell the user the place was not found.' };
       const ready = await openPlace(places[0]);
       if (!ready) return { place: places[0].name, routed: false, next_action: 'Tell the user no route was found yet.' };
@@ -1446,6 +1530,9 @@ function registerAgentTools() {
 }
 
 // -------------------------------------------------------------------- boot
+
+// For desk tests only: ?debug exposes the live state to the browser console.
+if (params.has('debug')) window.wayline = { state, map };
 
 buildKeyboard();
 history.replaceState({ screen: 'home', depth: 0 }, '');
