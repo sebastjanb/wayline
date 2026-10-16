@@ -214,10 +214,14 @@ class TileStore {
 }
 
 export class MapView {
-  constructor(canvas) {
+  // `size` is the canvas side in CSS pixels; `maxDpr` caps its resolution.
+  constructor(canvas, { size = 600, maxDpr = 2 } = {}) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
-    this.size = 600;
+    this.size = size;
+    this.maxDpr = maxDpr;
+    // Where street names and pins may sit, in canvas pixels: clear of the cards on top and bottom.
+    this.labelBox = [size / 15, size * 0.225, size * 0.935, size * 0.783];
     this.onTiles = null;
     this.store = new TileStore(() => { this.requestRender(); if (this.onTiles) this.onTiles(); });
     this.cam = { x: 0.5, y: 0.5, zoom: 16, bearing: 0, pitch: 0 };
@@ -241,7 +245,7 @@ export class MapView {
   }
 
   resize() {
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const dpr = Math.min(this.maxDpr, window.devicePixelRatio || 1);
     this.dpr = dpr;
     this.canvas.width = this.size * dpr;
     this.canvas.height = this.size * dpr;
@@ -552,7 +556,8 @@ export class MapView {
         const a = toScreen(l.ax, l.ay), b = toScreen(l.bx, l.by);
         if (!a || !b) continue;
         const q = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
-        if (Math.hypot(q[0] - mask.x, q[1] - mask.y) > mask.r * 0.82 || q[1] < 135 || q[1] > 470) continue;
+        const [bx0, by0, bx1, by1] = this.labelBox;
+        if (Math.hypot(q[0] - mask.x, q[1] - mask.y) > mask.r * 0.82 || q[0] < bx0 || q[0] > bx1 || q[1] < by0 || q[1] > by1) continue;
         if (Math.hypot(q[0] - ax, q[1] - ay) < 46) continue;   // keep the marker clear
         let angle = Math.atan2(b[1] - a[1], b[0] - a[0]);
         if (angle > Math.PI / 2) angle -= Math.PI;
@@ -592,7 +597,8 @@ export class MapView {
         if (!poi.style || poi.x < x0 || poi.x > x1 || poi.y < y0 || poi.y > y1) continue;
         if (this.dest && Math.abs(poi.x - this.dest.x) * S < 18 && Math.abs(poi.y - this.dest.y) * S < 18) continue;
         const q = toScreen(poi.x, poi.y);
-        if (!q || Math.hypot(q[0] - mask.x, q[1] - mask.y) > mask.r * 0.8 || q[1] < 150 || q[1] > 470 || q[0] < 40 || q[0] > 430) continue;
+        const [px0, py0, px1, py1] = this.labelBox;
+        if (!q || Math.hypot(q[0] - mask.x, q[1] - mask.y) > mask.r * 0.8 || q[1] < py0 + 15 || q[1] > py1 || q[0] < px0 || q[0] > px1 - 130) continue;
         if (Math.hypot(q[0] - ax, q[1] - ay) < 60) continue;
         // Sights, hotels and parks come before places to eat, which are everywhere.
         const everyday = poi.style.glyph === 'food' || poi.style.glyph === 'cup' ? 400 : 0;
@@ -699,6 +705,7 @@ export class MapView {
     }
 
     // Fade the map out to black so it floats instead of filling the lens.
+    if (mask.noFade) return;
     const fade = ctx.createRadialGradient(mask.x, mask.y, mask.r * 0.72, mask.x, mask.y, mask.r);
     fade.addColorStop(0, 'rgba(0,0,0,1)');
     fade.addColorStop(1, 'rgba(0,0,0,0)');

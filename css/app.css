@@ -34,6 +34,17 @@ body {
 
 #map { position: absolute; top: 0; left: 0; width: 600px; height: 600px; }
 
+/* Guidance map: drawn flat now and then, moved and tilted every frame by the
+   compositor, so the car glides however slowly the map itself can be drawn. */
+#navwrap { position: absolute; left: 0; top: 0; width: 1200px; height: 1200px; transform-origin: 600px 600px; will-change: transform; }
+#navwrap[hidden], #navfade[hidden], #navpuck[hidden] { display: none; }
+#navmap { width: 1200px; height: 1200px; }
+#navfade { position: absolute; left: 0; top: 0; width: 600px; height: 600px; pointer-events: none;
+  background: linear-gradient(to bottom, #000 0, #000 12%, rgba(0,0,0,0) 30%),
+              radial-gradient(ellipse 72% 78% at 50% 60%, rgba(0,0,0,0) 62%, #000 100%); }
+#navpuck { position: absolute; width: 48px; height: 48px; margin: -24px 0 0 -24px; pointer-events: none; transition: transform 250ms linear; }
+#navpuck svg { width: 48px; height: 48px; }
+
 .screen { position: absolute; top: 0; right: 0; bottom: 0; left: 0; display: none; pointer-events: none; }
 .screen.active { display: block; }
 .screen > *, .screen button, .screen input { pointer-events: auto; }

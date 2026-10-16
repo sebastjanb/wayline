@@ -3,7 +3,7 @@ import { RouteGuide } from './guide.js';
 import { searchPlaces, fetchRoute, fetchTraffic, trafficAvailable, MODES } from './services.js';
 import { lonToX, latToY, xToLon, yToLat, distance, bearing, angleDiff, formatDistance, formatDuration, EARTH_CIRCUMFERENCE } from './geo.js';
 
-const APP_VERSION = '2.14';
+const APP_VERSION = '2.15';
 
 // The app is static and can live on any host. The phone relay is a server
 // function, so it and the phone page stay on Netlify.
@@ -67,7 +67,14 @@ if (location.hostname.endsWith('netlify.app')) document.body.classList.add('host
 const EDGE = document.body.classList.contains('host-badge') ? 42 : 0;
 
 const map = new MapView($('map'));
-map.onTiles = () => renderStatus();
+// The guidance map: twice the lens in size, drawn flat, one pixel per pixel.
+const navView = new MapView($('navmap'), { size: 1200, maxDpr: 1 });
+navView.store = map.store;   // one tile cache for both
+navView.visible = true;
+navView.labels = true;
+navView.routeStyle = 'guide';
+navView.labelBox = [60, 60, 1140, 760];   // mostly ahead of the car, which sits at the centre
+map.onTiles = () => { renderStatus(); nav.dirty = true; };
 const loc = { fixes: 0, error: '', lastAt: 0 };
 const compass = { events: 0 };
 
@@ -630,13 +637,100 @@ setInterval(() => {
   const ahead = state.speed > 1 ? state.speed * Math.min(GLIDE_MS, Date.now() - anchor.at) / 1000 : 0;
   const want = Math.min(state.route.total, anchor.along + ahead);
   const was = state.shown ? state.shown.along : want;
-  const along = Math.abs(want - was) > 80 ? want : was + (want - was) * 0.35;
+  // A fix slightly behind the glide is held, not followed backwards: a car does not reverse.
+  const target = want < was && was - want < 40 ? was : want;
+  const along = Math.abs(target - was) > 80 ? target : was + (target - was) * 0.35;
   const at = g.pointAt(along);
   state.shown = { along, x: lonToX(at.lon), y: latToY(at.lat), course: at.course };
-  if (map.puck) { map.puck.x = state.shown.x; map.puck.y = state.shown.y; }
-  map.routeFrom = { index: g.indexAt(along), x: state.shown.x, y: state.shown.y };
-  aimCamera();
-}, 66);
+  state.shownIndex = g.indexAt(along);
+}, 50);
+
+// ------------------------------------------------- guidance map, per frame
+// The flat map is redrawn only when the car has moved far from where it was
+// drawn, the heading has turned a lot, or the route has changed. Every frame
+// in between, the drawn map is only moved, turned and tilted with a CSS
+// transform, which the glasses' compositor does smoothly.
+const nav = { drawn: null, dirty: true, lastDrawAt: 0 };
+const NAV_ANCHOR = () => ({ x: 300, y: (settings.headingUp ? 400 : 320) - EDGE / 2 });
+
+// Where the car will be one step from now: the compositor then slides the map
+// there over that step, so motion stays smooth even if this code only gets to
+// run a few times a second.
+const NAV_STEP_MS = 250;
+function navPosition() {
+  if (state.shown && state.guide) {
+    const lead = state.speed > 1 ? state.speed * NAV_STEP_MS / 1000 : 0;
+    const at = state.guide.pointAt(Math.min(state.route.total, state.shown.along + lead));
+    return { x: lonToX(at.lon), y: latToY(at.lat), course: at.course };
+  }
+  const p = state.progress;
+  if (p && p.off < 25) return { x: p.x, y: p.y };
+  return state.fix ? world(state.fix) : null;
+}
+
+function drawNav(at, bearing, zoom) {
+  const { route, progress, place } = state;
+  navView.setLayout({ x: 600, y: 600 }, { x: 600, y: 600, r: 900, noFade: true });
+  navView.setCamera({ x: at.x, y: at.y, zoom, bearing, pitch: 0 }, true);
+  navView.route = route.world;
+  navView.routeFrom = progress ? { index: state.shown ? state.shownIndex : progress.index, x: at.x, y: at.y } : null;
+  navView.jams = jamLines(state.shown ? state.shown.along : progress ? progress.along : 0);
+  navView.dest = world(place);
+  navView.puck = null;   // the marker is its own element, always at the anchor
+  navView.anchor = { x: 600, y: 600 };
+  cancelAnimationFrame(navView.raf);
+  clearTimeout(navView.rafTimer);
+  navView.raf = 0;
+  const t0 = performance.now();
+  navView.draw();
+  nav.draws = (nav.draws || 0) + 1;
+  nav.drawMs = Math.round(performance.now() - t0);
+  nav.drawn = { x: at.x, y: at.y, bearing, zoom };
+  nav.dirty = false;
+  nav.lastDrawAt = Date.now();
+}
+
+function navFrame() {
+  const active = state.screen === 'nav' && state.guide && state.route && !state.look;
+  $('navwrap').hidden = $('navfade').hidden = $('navpuck').hidden = !active;
+  if (active) {
+    const at = navPosition();
+    if (at) {
+      const up = settings.headingUp;
+      const head = facing();
+      const bearing = up ? (head != null ? head : state.progress ? state.progress.course : 0) : 0;
+      const zoom = up ? 17.6 : 17;
+      const d = nav.drawn;
+      const S = 256 * 2 ** zoom;
+      let rx = 0, ry = 0, turn = 0;
+      if (d) {
+        const b = d.bearing * Math.PI / 180, cosB = Math.cos(b), sinB = Math.sin(b);
+        const dx = (at.x - d.x) * S, dy = (at.y - d.y) * S;
+        rx = dx * cosB + dy * sinB;
+        ry = -dx * sinB + dy * cosB;
+        turn = angleDiff(bearing, d.bearing);
+      }
+      const wrap = $('navwrap');
+      let glide = true;
+      if (!d || nav.dirty || d.zoom !== zoom || Math.hypot(rx, ry) > 260 || Math.abs(turn) > 25 || Date.now() - nav.lastDrawAt > 15000) {
+        drawNav(at, bearing, zoom);
+        rx = ry = turn = 0;
+        glide = false;   // the picture itself moved: place it, do not slide it
+      }
+      wrap.style.transition = glide ? `transform ${NAV_STEP_MS}ms linear` : 'none';
+      const a = NAV_ANCHOR();
+      wrap.style.left = `${a.x - 600}px`;
+      wrap.style.top = `${a.y - 600}px`;
+      wrap.style.transform = `perspective(900px) rotateX(${up ? 55 : 0}deg) rotate(${(-turn).toFixed(2)}deg) translate(${(-rx).toFixed(1)}px, ${(-ry).toFixed(1)}px)`;
+      const puck = $('navpuck');
+      puck.style.left = `${a.x}px`;
+      puck.style.top = `${a.y}px`;
+      const arrow = head != null ? angleDiff(head, bearing) : 0;
+      puck.style.transform = `scaleY(${up ? 0.7 : 1}) rotate(${arrow.toFixed(1)}deg)`;
+    }
+  }
+}
+setInterval(navFrame, NAV_STEP_MS);
 
 // While guiding, say so on the turn card when positions stop coming, instead
 // of showing a distance that is no longer true.
@@ -673,7 +767,7 @@ function aimCamera() {
 
 function refresh() {
   const { screen, fix, route, place, progress } = state;
-  map.visible = screen === 'home' || screen === 'place' || screen === 'nav';
+  map.visible = screen === 'home' || screen === 'place' || (screen === 'nav' && (state.look || !state.guide));
   map.routeStyle = screen === 'nav' ? 'guide' : 'preview';
   map.pins = [];
   map.route = null;
@@ -1047,6 +1141,8 @@ let demoTimer = 0;
 
 function startGuidance() {
   if (!state.route || !state.fix) return;
+  nav.dirty = true;
+  nav.drawn = null;
   state.guide = new RouteGuide(state.route);
   state.said = {};
   state.offCount = 0;
@@ -1251,6 +1347,7 @@ async function updateTraffic() {
       return;
     }
     state.traffic = t;
+    nav.dirty = true;
     // Say it when a delay first matters, and again only when it has grown.
     if (t.delay >= 180 && t.delay - state.trafficSaid >= 120) {
       state.trafficSaid = t.delay;
@@ -1299,6 +1396,7 @@ $('faster').addEventListener('click', async () => {
     if (state.guide) {
       state.route = route;
       state.guide = new RouteGuide(route);
+      nav.dirty = true;
       state.said = {};
       state.offCount = 0;
       state.traffic = null;
@@ -1323,6 +1421,7 @@ async function reroute(saying = 'Rerouting.') {
     if (state.guide) {
       state.route = route;
       state.guide = new RouteGuide(route);
+      nav.dirty = true;
       state.said = {};
       state.offCount = 0;
       state.traffic = null;
@@ -1461,6 +1560,7 @@ function renderDiagnostics() {
     `Location: ${loc.fixes} fixes${state.fix ? `, ±${Math.round(state.fix.accuracy)} m, ${Math.round((Date.now() - loc.lastAt) / 1000)} s ago` : ''}`,
     `Location error: ${loc.error || 'none'}`,
     `Positions from: watch ${source.watch}, poll ${source.poll}, gesture ${source.gesture}`,
+    `Guidance map: ${nav.draws || 0} draws, last ${nav.drawMs || 0} ms`,
     `Location permission: ${permission}, asked ${loc.asked || 0}×`,
     state.fix ? `Position: ${state.fix.lat.toFixed(4)}, ${state.fix.lon.toFixed(4)}` : 'Position: none',
     `Compass: ${compass.events} readings, ${sawAbsolute ? 'true north' : 'relative'}, ${settings.flipCompass ? 'mirrored' : 'direct'}, offset ${Math.round(headingOffset)}°`,
@@ -1532,7 +1632,7 @@ function registerAgentTools() {
 // -------------------------------------------------------------------- boot
 
 // For desk tests only: ?debug exposes the live state to the browser console.
-if (params.has('debug')) window.wayline = { state, map };
+if (params.has('debug')) window.wayline = { state, map, navView, nav };
 
 buildKeyboard();
 history.replaceState({ screen: 'home', depth: 0 }, '');
